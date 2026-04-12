@@ -17,7 +17,7 @@ LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(exist_ok=True)
 
 def _make_log_filename():
-    return str(LOG_DIR / datetime.now().strftime("%Y-%m") + ".log")
+    return str(LOG_DIR / (datetime.now().strftime("%Y-%m") + ".log"))
 
 class MonthlyFileHandler(logging.handlers.BaseRotatingHandler):
     """Меняет файл при смене месяца."""
