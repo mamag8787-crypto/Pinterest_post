@@ -218,9 +218,14 @@ async def _dismiss_onboarding(page):
 
 
 async def _is_logged_in(page) -> bool:
+    # Бизнес-аккаунт редиректит на /business/hub/ — это тоже залогинен
+    url = page.url
+    if any(x in url for x in ['/business/hub', '/business/hub/', 'pinterest.com/business']):
+        logger.info(f"Бизнес-аккаунт определён по URL: {url}")
+        return True
     try:
         await page.wait_for_selector(
-            '[data-test-id="header-avatar"], [data-test-id="homefeed-feed"]',
+            '[data-test-id="header-avatar"], [data-test-id="homefeed-feed"], [aria-label="Бизнес-центр"]',
             timeout=5000
         )
         return True
