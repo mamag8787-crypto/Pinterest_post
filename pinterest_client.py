@@ -190,6 +190,33 @@ class PinterestClient:
                 await browser.close()
 
 
+async def _dismiss_onboarding(page):
+    """Закрывает онбординговый туториал Pinterest (1 из 4 шагов)."""
+    try:
+        # Пробуем кликнуть X (закрыть)
+        close_btn = await page.query_selector('[data-test-id="modal-close"], [aria-label="Закрыть"], button[aria-label="Close"]')
+        if close_btn:
+            await close_btn.click()
+            await asyncio.sleep(1)
+            logger.info("Онбординг закрыт через X")
+            return
+        # Пробуем пройти все 4 шага кликая "Далее"
+        for step in range(4):
+            next_btn = await page.query_selector('button:has-text("Далее"), button:has-text("Next")')
+            if not next_btn:
+                break
+            await next_btn.click()
+            await asyncio.sleep(0.8)
+            logger.info(f"Онбординг шаг {step+1} пройден")
+        # После последнего шага может быть кнопка "Начать" или "Done"
+        done_btn = await page.query_selector('button:has-text("Начать"), button:has-text("Done"), button:has-text("Got it")')
+        if done_btn:
+            await done_btn.click()
+            await asyncio.sleep(1)
+    except Exception as e:
+        logger.info(f"Онбординг не найден или уже закрыт: {e}")
+
+
 async def _is_logged_in(page) -> bool:
     try:
         await page.wait_for_selector(
