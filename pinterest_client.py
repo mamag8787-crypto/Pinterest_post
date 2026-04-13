@@ -191,30 +191,45 @@ class PinterestClient:
 
 
 async def _dismiss_onboarding(page):
-    """Закрывает онбординговый туториал Pinterest (1 из 4 шагов)."""
+    """Закрывает онбординговый туториал Pinterest всеми способами."""
+    # Способ 1: Escape
     try:
-        # Пробуем кликнуть X (закрыть)
-        close_btn = await page.query_selector('[data-test-id="modal-close"], [aria-label="Закрыть"], button[aria-label="Close"]')
-        if close_btn:
-            await close_btn.click()
-            await asyncio.sleep(1)
-            logger.info("Онбординг закрыт через X")
-            return
-        # Пробуем пройти все 4 шага кликая "Далее"
-        for step in range(4):
-            next_btn = await page.query_selector('button:has-text("Далее"), button:has-text("Next")')
-            if not next_btn:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.8)
+        logger.info("Нажали Escape для закрытия онбординга")
+    except Exception:
+        pass
+
+    # Способ 2: Кликаем все кнопки "Далее" и "Начать" до победы
+    for attempt in range(6):
+        try:
+            # Ищем любую кнопку закрытия/прохода
+            btn = await page.evaluate("""() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const targets = ['Далее', 'Next', 'Начать', 'Done', 'Got it', 'Понятно'];
+                const btn = buttons.find(b => targets.some(t => b.textContent.trim().includes(t)));
+                if (btn) { btn.click(); return true; }
+                return false;
+            }""")
+            if btn:
+                await asyncio.sleep(0.8)
+                logger.info(f"Онбординг: клик шаг {attempt+1}")
+            else:
                 break
-            await next_btn.click()
-            await asyncio.sleep(0.8)
-            logger.info(f"Онбординг шаг {step+1} пройден")
-        # После последнего шага может быть кнопка "Начать" или "Done"
-        done_btn = await page.query_selector('button:has-text("Начать"), button:has-text("Done"), button:has-text("Got it")')
-        if done_btn:
-            await done_btn.click()
-            await asyncio.sleep(1)
+        except Exception:
+            break
+
+    # Способ 3: JavaScript — убиваем все модальные оверлеи
+    try:
+        await page.evaluate("""() => {
+            // Убираем все диалоги и оверлеи
+            document.querySelectorAll('[role="dialog"], [data-test-id*="modal"], [class*="overlay"]')
+                .forEach(el => el.remove());
+        }""")
+        await asyncio.sleep(0.5)
+        logger.info("JS: удалили модальные элементы")
     except Exception as e:
-        logger.info(f"Онбординг не найден или уже закрыт: {e}")
+        logger.info(f"JS dismiss failed: {e}")
 
 
 async def _is_logged_in(page) -> bool:
