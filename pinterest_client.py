@@ -13,6 +13,30 @@ PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
 PINTEREST_BOARD    = os.getenv("PINTEREST_BOARD_NAME")
 SESSION_FILE       = os.getenv("SESSION_FILE", "/data/pinterest_session.json")
 
+# Будет установлен из бота для отправки скриншотов
+_bot_instance = None
+_owner_id = int(os.getenv("ALLOWED_USER_ID", "0"))
+
+def set_bot(bot):
+    global _bot_instance
+    _bot_instance = bot
+
+async def _send_screenshot(page, label="debug"):
+    """Шлёт скриншот владельцу в TG для отладки."""
+    if not _bot_instance or not _owner_id:
+        return
+    try:
+        path = f"/tmp/pinterest_{label}.png"
+        await page.screenshot(path=path, full_page=False)
+        with open(path, "rb") as f:
+            await _bot_instance.send_photo(
+                chat_id=_owner_id,
+                photo=f,
+                caption=f"🔍 Pinterest debug: {label}\nURL: {page.url}"
+            )
+    except Exception as e:
+        logger.error(f"Не удалось отправить скриншот: {e}")
+
 
 class PinterestClient:
     def __init__(self, **kwargs):
@@ -26,9 +50,7 @@ class PinterestClient:
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
                     "--window-size=1280,900",
-                    "--start-maximized",
                 ]
             )
             context = await browser.new_context(
@@ -40,127 +62,129 @@ class PinterestClient:
                 ),
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
-                extra_http_headers={
-                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-                }
             )
-
-            # Скрываем признаки автоматизации
             await context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US'] });
                 window.chrome = { runtime: {} };
             """)
 
-            # Загружаем сохранённую сессию
-            session_loaded = False
+            # Загружаем сессию
             if Path(SESSION_FILE).exists():
                 try:
                     cookies = json.loads(Path(SESSION_FILE).read_text())
                     await context.add_cookies(cookies)
-                    session_loaded = True
-                    logger.info("Сессия загружена из файла")
+                    logger.info("Сессия загружена")
                 except Exception as e:
-                    logger.warning(f"Не удалось загрузить сессию: {e}")
+                    logger.warning(f"Сессия не загружена: {e}")
 
             page = await context.new_page()
 
             try:
-                # Всегда идём через логин-проверку
-                logger.info("Открываем Pinterest...")
-                await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=30000)
-                await _human_delay(2, 3)
+                # Шаг 1: главная
+                logger.info("Открываем главную Pinterest...")
+                try:
+                    await page.goto("https://www.pinterest.com/", wait_until="commit", timeout=30000)
+                except Exception as e:
+                    logger.warning(f"goto main: {e}")
+                await asyncio.sleep(3)
+                await _send_screenshot(page, "1_main")
 
+                # Шаг 2: проверяем логин
                 if not await _is_logged_in(page):
-                    logger.info("Не залогинен — выполняем логин")
+                    logger.info("Нужен логин...")
                     await _login(page)
-                    # Сохраняем сессию
+                    await _send_screenshot(page, "2_after_login")
                     cookies = await context.cookies()
                     Path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
                     Path(SESSION_FILE).write_text(json.dumps(cookies))
                     logger.info("Сессия сохранена")
                 else:
                     logger.info("Уже залогинен")
+                    await _send_screenshot(page, "2_logged_in")
 
-                # Открываем создание пина
+                # Шаг 3: создание пина
                 logger.info("Переходим к созданию пина...")
-                await page.goto("https://www.pinterest.com/pin-builder/", wait_until="domcontentloaded", timeout=30000)
-                await _human_delay(3, 4)
+                try:
+                    await page.goto("https://www.pinterest.com/pin-builder/", wait_until="commit", timeout=30000)
+                except Exception as e:
+                    logger.warning(f"goto pin-builder: {e}")
+                await asyncio.sleep(4)
+                await _send_screenshot(page, "3_pin_builder")
 
-                # Если редиректнуло — пробуем альтернативный URL
-                if "pin-builder" not in page.url and "pin-creation" not in page.url:
-                    logger.info(f"Редирект на {page.url}, пробуем прямой URL")
-                    await page.goto("https://www.pinterest.com/pin-creation-tool/", wait_until="domcontentloaded", timeout=30000)
-                    await _human_delay(3, 4)
+                # Шаг 4: загружаем файл
+                logger.info("Ищем input[type=file]...")
+                try:
+                    file_input = await page.wait_for_selector('input[type="file"]', timeout=20000)
+                    await file_input.set_input_files(video_path)
+                    logger.info("Файл загружен")
+                except PlaywrightTimeout:
+                    await _send_screenshot(page, "4_no_file_input")
+                    return {"success": False, "error": "Не найдено поле загрузки файла. Проверь скриншот в TG."}
 
-                # Загружаем видео
-                logger.info("Ищем поле загрузки файла...")
-                file_input = await page.wait_for_selector('input[type="file"]', timeout=20000)
-                await file_input.set_input_files(video_path)
-                logger.info("Видео загружено, ждём обработки...")
+                await asyncio.sleep(3)
+                await _send_screenshot(page, "4_file_uploaded")
 
-                # Ждём появления полей редактирования (видео обработано)
-                await page.wait_for_selector(
-                    '[data-test-id="pin-draft-title"]',
-                    timeout=180000  # 3 минуты — видео может долго обрабатываться
-                )
-                await _human_delay(2, 3)
+                # Шаг 5: ждём полей
+                logger.info("Ждём обработки видео...")
+                try:
+                    await page.wait_for_selector('[data-test-id="pin-draft-title"]', timeout=180000)
+                except PlaywrightTimeout:
+                    await _send_screenshot(page, "5_no_title_field")
+                    return {"success": False, "error": "Поле заголовка не появилось. Проверь скриншот в TG."}
+
+                await asyncio.sleep(2)
 
                 # Заголовок
-                title_field = await page.wait_for_selector('[data-test-id="pin-draft-title"]')
-                await title_field.click()
-                await _human_delay(0.3, 0.6)
-                await title_field.fill(title[:100])
+                title_field = await page.query_selector('[data-test-id="pin-draft-title"]')
+                if title_field:
+                    await title_field.click()
+                    await asyncio.sleep(0.4)
+                    await title_field.type(title[:100], delay=60)
 
                 # Описание
                 desc_field = await page.query_selector('[data-test-id="pin-draft-description"]')
                 if desc_field:
                     await desc_field.click()
-                    await _human_delay(0.3, 0.6)
-                    await desc_field.fill(description[:500])
+                    await asyncio.sleep(0.4)
+                    await desc_field.type(description[:500], delay=40)
 
                 # Ссылка
                 if link:
                     link_field = await page.query_selector('[data-test-id="pin-draft-link"]')
                     if link_field:
                         await link_field.click()
-                        await _human_delay(0.3, 0.6)
-                        await link_field.fill(link)
+                        await asyncio.sleep(0.4)
+                        await link_field.type(link, delay=60)
 
-                # Выбор доски
+                await _send_screenshot(page, "5_fields_filled")
+
+                # Доска
                 await _select_board(page, PINTEREST_BOARD)
-                await _human_delay(1, 2)
+                await asyncio.sleep(1)
 
-                # Публикуем
+                # Публикация
                 publish_btn = await page.wait_for_selector(
-                    '[data-test-id="board-dropdown-save-button"]',
-                    timeout=10000
+                    '[data-test-id="board-dropdown-save-button"]', timeout=10000
                 )
                 await publish_btn.click()
-                logger.info("Нажали публикацию, ждём подтверждения...")
+                logger.info("Нажали публикацию...")
 
-                # Ждём успеха
                 await page.wait_for_selector(
                     '[data-test-id="pin-save-success"], [class*="successToast"], [class*="success"]',
                     timeout=30000
                 )
-                await _human_delay(2, 3)
+                await asyncio.sleep(2)
+                await _send_screenshot(page, "6_success")
 
                 pin_id = _extract_pin_id(page.url)
-                logger.info(f"Пин опубликован: {pin_id}")
                 return {"success": True, "pin_id": pin_id or "unknown"}
 
-            except PlaywrightTimeout as e:
-                try:
-                    screenshot = f"/tmp/pinterest_error_{int(asyncio.get_event_loop().time())}.png"
-                    await page.screenshot(path=screenshot, full_page=True)
-                    logger.error(f"Таймаут. URL: {page.url}. Скриншот: {screenshot}")
-                except Exception:
-                    pass
-                return {"success": False, "error": f"Таймаут: {e}"}
             except Exception as e:
                 logger.error(f"Ошибка: {e}")
+                try:
+                    await _send_screenshot(page, "error_final")
+                except Exception:
+                    pass
                 return {"success": False, "error": str(e)}
             finally:
                 await browser.close()
@@ -169,7 +193,7 @@ class PinterestClient:
 async def _is_logged_in(page) -> bool:
     try:
         await page.wait_for_selector(
-            '[data-test-id="header-avatar"], [data-test-id="homefeed-feed"], [aria-label="Ваш аккаунт"]',
+            '[data-test-id="header-avatar"], [data-test-id="homefeed-feed"]',
             timeout=5000
         )
         return True
@@ -178,26 +202,33 @@ async def _is_logged_in(page) -> bool:
 
 
 async def _login(page):
-    logger.info("Логин в Pinterest...")
-    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=30000)
-    await _human_delay(2, 3)
+    logger.info("Выполняем логин...")
+    try:
+        await page.goto("https://www.pinterest.com/login/", wait_until="commit", timeout=30000)
+    except Exception as e:
+        logger.warning(f"goto login: {e}")
+    await asyncio.sleep(3)
 
     email_input = await page.wait_for_selector('#email', timeout=15000)
     await email_input.click()
-    await _human_delay(0.5, 1)
+    await asyncio.sleep(0.5)
     await email_input.type(PINTEREST_EMAIL, delay=80)
-    await _human_delay(0.5, 1)
+    await asyncio.sleep(0.7)
 
     password_input = await page.wait_for_selector('#password', timeout=10000)
     await password_input.click()
-    await _human_delay(0.5, 1)
+    await asyncio.sleep(0.5)
     await password_input.type(PINTEREST_PASSWORD, delay=80)
-    await _human_delay(0.5, 1)
+    await asyncio.sleep(0.7)
 
     await page.keyboard.press("Enter")
-    await page.wait_for_url("**/", timeout=30000)
-    await _human_delay(2, 3)
-    logger.info("Логин успешен")
+
+    try:
+        await page.wait_for_url("**/", timeout=30000)
+    except Exception as e:
+        logger.warning(f"wait_for_url after login: {e}")
+    await asyncio.sleep(3)
+    logger.info(f"После логина URL: {page.url}")
 
 
 async def _select_board(page, board_name: str):
@@ -205,24 +236,15 @@ async def _select_board(page, board_name: str):
         '[data-test-id="board-dropdown-select-button"]', timeout=10000
     )
     await board_btn.click()
-    await _human_delay(1, 2)
-
+    await asyncio.sleep(1)
     search = await page.query_selector('[data-test-id="board-search-input"]')
     if search:
         await search.type(board_name, delay=60)
-        await _human_delay(1, 2)
-
+        await asyncio.sleep(1)
     board_option = await page.wait_for_selector(
         f'[data-test-id="board-row"]:has-text("{board_name}")', timeout=10000
     )
     await board_option.click()
-
-
-async def _human_delay(min_sec: float, max_sec: float = None):
-    import random
-    if max_sec is None:
-        max_sec = min_sec
-    await asyncio.sleep(random.uniform(min_sec, max_sec))
 
 
 def _extract_pin_id(url: str) -> str:

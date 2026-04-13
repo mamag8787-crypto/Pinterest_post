@@ -10,6 +10,7 @@ from telegram.ext import Application, MessageHandler, CommandHandler, filters, C
 
 import database
 from scheduler import setup_scheduler, get_post_times, TIMEZONE, POSTS_PER_DAY
+import pinterest_client
 
 # ── Логирование ───────────────────────────────────────────────────────────────
 
@@ -238,6 +239,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     await database.init_db()
+    pinterest_client.set_bot(app.bot)
     scheduler = setup_scheduler(app.bot)
     scheduler.start()
     logger.info("БД готова, планировщик запущен.")
