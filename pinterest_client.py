@@ -83,9 +83,30 @@ class PinterestClient:
 
                 await _send_screenshot(page, "1_logged_in")
 
-                # Шаг 2: переходим на создание пина
-                await page.goto("https://www.pinterest.com/pin-builder/", wait_until="commit", timeout=30000)
-                await asyncio.sleep(4)
+                # Шаг 2: переходим на создание пина (pin-creation-tool для видео)
+                try:
+                    await page.goto("https://www.pinterest.com/pin-creation-tool/", wait_until="domcontentloaded", timeout=30000)
+                    await asyncio.sleep(4)
+                    logger.info(f"pin-creation-tool URL: {page.url}")
+                except Exception as e:
+                    logger.warning(f"pin-creation-tool failed: {e}")
+                    # Запасной: кликаем Создать в меню
+                    await page.goto("https://www.pinterest.com/", wait_until="commit", timeout=30000)
+                    await asyncio.sleep(3)
+                    try:
+                        create_btn = await page.wait_for_selector(
+                            "a[href*=pin-creation], [data-test-id='header-create-menu-trigger'], button:has-text('Создать')",
+                            timeout=8000
+                        )
+                        await create_btn.click()
+                        await asyncio.sleep(2)
+                        pin_option = await page.wait_for_selector(
+                            "a:has-text('Создать пин'), [href*=pin-creation]", timeout=5000
+                        )
+                        await pin_option.click()
+                        await asyncio.sleep(3)
+                    except Exception as e2:
+                        logger.warning(f"Menu click failed: {e2}")
                 await _send_screenshot(page, "2_pin_builder")
 
                 # Шаг 3: закрываем онбординг
