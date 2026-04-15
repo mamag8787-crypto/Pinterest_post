@@ -107,31 +107,28 @@ async def post_next_from_queue(bot, scheduler=None):
         _cleanup(downloaded_path, pinterest_ready_path)
 
     if result["success"]:
-        pin_id = result["pin_id"]
-        await database.mark_posted(queue_id, file_unique_id, pin_id, title)
+    pin_id = result["pin_id"]
+    await database.mark_posted(queue_id, file_unique_id, pin_id, title)
 
-        stats = await database.get_queue_stats()
-        pending = stats["pending"]
-        report = (
-            f"✅ <b>Опубликовано!</b>\n\n"
-            f"📌 <b>{title}</b>\n"
-            f"🔗 https://www.pinterest.com/pin/{pin_id}/\n"
-            f"🔁 Ссылка в пине: <code>{pin_link}</code>\n\n"
-            f"📋 В очереди: <b>{pending}</b> видео"
-        )
-        week_threshold = POSTS_PER_DAY * 7
-        if 0 < pending <= week_threshold:
-            days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
-            report += (
-                f"\n\n⚠️ <b>Запас на {days_left} дн.</b>\n"
-                f"Нужно минимум {week_threshold} видео для недельного буфера."
-            )
-        await _notify(bot, report)
+    stats = await database.get_queue_stats()
+    pending = stats["pending"]
+    days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
+
+    report = (
+        f"✅ Опубликовано\n"
+        f"В очереди: {pending}\n"
+        f"Хватит примерно на: {days_left} дн."
+    )
+    await _notify(bot, report)
     else:
         await _handle_error(bot, queue_id, file_unique_id, retry_count, result["error"], scheduler, "Pinterest")
 
 
 async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, scheduler, stage):
+    stats = await database.get_queue_stats()
+    pending = stats["pending"]
+    days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
+
     if retry_count < MAX_RETRIES:
         next_try = retry_count + 1
         await database.mark_retry(queue_id, error)
@@ -142,19 +139,17 @@ async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, sched
                 trigger=DateTrigger(run_date=run_at),
                 args=[bot, scheduler],
                 id=f"retry_{queue_id}_{next_try}",
-                replace_existing=True,
+                replace_existing=True
             )
         await _notify(
             bot,
-            f"⚠️ <b>Ошибка на этапе {stage}</b>\n\n{error}\n\n"
-            f"🔄 Попытка {next_try}/{MAX_RETRIES} через {RETRY_DELAY_MIN} мин.",
+            f"⚠️ Не опубликовано\nВ очереди: {pending}\nХватит примерно на: {days_left} дн.\nПовтор: {next_try}/{MAX_RETRIES}"
         )
     else:
         await database.mark_failed(queue_id, file_unique_id, error)
         await _notify(
             bot,
-            f"❌ <b>Видео #{queue_id} провалилось</b>\n\n{error}\n\n"
-            f"Исчерпаны все {MAX_RETRIES} попытки. /retry — попробовать снова.",
+            f"❌ Не опубликовано\nВ очереди: {pending}\nХватит примерно на: {days_left} дн."
         )
 
 
