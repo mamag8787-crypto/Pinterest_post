@@ -44,11 +44,6 @@ async def post_next_from_queue(bot, scheduler=None):
     items = await database.get_next_pending(count=1)
     if not items:
         logger.info("Очередь пуста.")
-        await _notify(
-            bot,
-            "📭 <b>Очередь пуста!</b>\n\n"
-            f"Загрузи видео на неделю вперёд — нужно минимум <b>{POSTS_PER_DAY * 7} видео</b>."
-        )
         return
 
     item = items[0]
@@ -107,21 +102,29 @@ async def post_next_from_queue(bot, scheduler=None):
         _cleanup(downloaded_path, pinterest_ready_path)
 
     if result["success"]:
-    pin_id = result["pin_id"]
-    await database.mark_posted(queue_id, file_unique_id, pin_id, title)
+        pin_id = result["pin_id"]
+        await database.mark_posted(queue_id, file_unique_id, pin_id, title)
 
-    stats = await database.get_queue_stats()
-    pending = stats["pending"]
-    days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
+        stats = await database.get_queue_stats()
+        pending = stats["pending"]
+        days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
 
-    report = (
-        f"✅ Опубликовано\n"
-        f"В очереди: {pending}\n"
-        f"Хватит примерно на: {days_left} дн."
-    )
-    await _notify(bot, report)
+        report = (
+            f"✅ Опубликовано\n"
+            f"В очереди: {pending}\n"
+            f"Хватит примерно на: {days_left} дн."
+        )
+        await _notify(bot, report)
     else:
-        await _handle_error(bot, queue_id, file_unique_id, retry_count, result["error"], scheduler, "Pinterest")
+        await _handle_error(
+            bot,
+            queue_id,
+            file_unique_id,
+            retry_count,
+            result.get("error", "Неизвестная ошибка Pinterest"),
+            scheduler,
+            "Pinterest",
+        )
 
 
 async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, scheduler, stage):
@@ -139,46 +142,48 @@ async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, sched
                 trigger=DateTrigger(run_date=run_at),
                 args=[bot, scheduler],
                 id=f"retry_{queue_id}_{next_try}",
-                replace_existing=True
+                replace_existing=True,
             )
+
         await _notify(
             bot,
-            f"⚠️ Не опубликовано\nВ очереди: {pending}\nХватит примерно на: {days_left} дн.\nПовтор: {next_try}/{MAX_RETRIES}"
+            f"⚠️ Не опубликовано\n"
+            f"В очереди: {pending}\n"
+            f"Хватит примерно на: {days_left} дн.\n"
+            f"Повтор: {next_try}/{MAX_RETRIES}",
         )
+        logger.error("Ошибка на этапе %s для queue_id=%s: %s", stage, queue_id, error)
     else:
         await database.mark_failed(queue_id, file_unique_id, error)
         await _notify(
             bot,
-            f"❌ Не опубликовано\nВ очереди: {pending}\nХватит примерно на: {days_left} дн."
+            f"❌ Не опубликовано\n"
+            f"В очереди: {pending}\n"
+            f"Хватит примерно на: {days_left} дн.",
         )
+        logger.error("Видео queue_id=%s окончательно не опубликовано. Этап=%s Ошибка=%s", queue_id, stage, error)
 
 
 async def send_weekly_stats(bot):
     stats = await database.get_queue_stats()
-    now = datetime.now()
-    w0 = (now - timedelta(days=7)).strftime("%d.%m")
-    w1 = now.strftime("%d.%m")
     await _notify(
         bot,
-        f"📊 <b>Недельный отчёт Pinterest</b>\n<i>{w0} — {w1}</i>\n\n"
-        f"✅ Опубликовано: <b>{stats['week_posted']}</b>\n"
-        f"❌ Ошибок: <b>{stats['week_errors']}</b>\n"
-        f"📋 В очереди: <b>{stats['pending']}</b>\n"
-        f"📌 Всего: <b>{stats['total_posted']}</b>",
+        f"📊 За 7 дней\n"
+        f"Опубликовано: {stats['week_posted']}\n"
+        f"Ошибок: {stats['week_errors']}\n"
+        f"В очереди: {stats['pending']}",
     )
 
 
 async def _notify(bot, text: str):
     if ALLOWED_USER_ID:
         try:
-            await bot.send_message(chat_id=ALLOWED_USER_ID, text=text, parse_mode="HTML")
+            await bot.send_message(chat_id=ALLOWED_USER_ID, text=text)
         except Exception as e:
             logger.error("Не удалось отправить уведомление: %s", e)
 
 
 def _cleanup(*paths):
-    import os
-
     for path in paths:
         if path and os.path.exists(path):
             try:
