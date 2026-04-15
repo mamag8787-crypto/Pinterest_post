@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 PINTEREST_EMAIL    = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
 PINTEREST_BOARD    = os.getenv("PINTEREST_BOARD_NAME")
+PINTEREST_USERNAME = os.getenv("PINTEREST_USERNAME", "")
 SESSION_FILE       = os.getenv("SESSION_FILE", "/data/pinterest_session.json")
 
 _bot_instance = None
@@ -78,8 +79,8 @@ class PinterestClient:
                     Path(SESSION_FILE).write_text(json.dumps(cookies))
                 await _send_screenshot(page, "1_logged_in")
 
-                # Узнаём username
-                username = await _get_username(page)
+                # Username из env или автодетект
+                username = PINTEREST_USERNAME or await _get_username(page)
                 logger.info(f"Username: {username}")
 
                 # Открываем страницу доски напрямую
