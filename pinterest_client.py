@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,8 @@ LEGACY_SESSION_FILE = Path("/data/pinterest_session.json")
 PINTEREST_CREATE_URL = os.getenv("PINTEREST_CREATE_URL", "https://www.pinterest.com/pin-creation-tool/")
 PINTEREST_FALLBACK_CREATE_URL = os.getenv("PINTEREST_FALLBACK_CREATE_URL", "https://www.pinterest.com/pin-builder/")
 BOOTSTRAP_LOGIN = os.getenv("PINTEREST_BOOTSTRAP_LOGIN", "0") == "1"
+BROWSER_CHANNEL = os.getenv("PINTEREST_BROWSER_CHANNEL", "chrome").strip() or "chrome"
+BROWSER_EXECUTABLE_PATH = os.getenv("PINTEREST_EXECUTABLE_PATH", "").strip() or None
 
 _bot_instance = None
 _owner_id = int(os.getenv("ALLOWED_USER_ID", "0"))
@@ -38,30 +40,36 @@ async def _send_screenshot(page, label="debug"):
 
 
 def _existing_session_file() -> Path | None:
-    if SESSION_FILE.exists() and SESSION_FILE.stat().st_size > 0:
-        return SESSION_FILE
-    if LEGACY_SESSION_FILE.exists() and LEGACY_SESSION_FILE.stat().st_size > 0:
-        return LEGACY_SESSION_FILE
+    for candidate in (SESSION_FILE, LEGACY_SESSION_FILE):
+        if candidate.exists() and candidate.stat().st_size > 0:
+            return candidate
     return None
 
 
 class PinterestClient:
     async def create_video_pin(self, video_path, title, description, link="") -> dict:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=not BOOTSTRAP_LOGIN,
-                args=[
+            launch_kwargs = {
+                "headless": not BOOTSTRAP_LOGIN,
+                "channel": BROWSER_CHANNEL,
+                "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
                 ],
-            )
+            }
+            if BROWSER_EXECUTABLE_PATH:
+                launch_kwargs["executable_path"] = BROWSER_EXECUTABLE_PATH
+
+            logger.info("Запускаю браузер Playwright через channel=%s", BROWSER_CHANNEL)
+            browser = await p.chromium.launch(**launch_kwargs)
+
             context_kwargs = dict(
                 viewport={"width": 1440, "height": 1080},
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
+                    "Chrome/124.0.0.0 Safari/537.36"
                 ),
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
@@ -92,6 +100,7 @@ class PinterestClient:
                     return {"success": False, "error": "Не найден input[type=file] в pin builder"}
 
                 await file_input.set_input_files(video_path)
+                logger.info("Видео загружено в form input: %s", video_path)
                 await asyncio.sleep(10)
                 await self._raise_if_upload_error(page)
                 await _send_screenshot(page, "3_after_upload")
@@ -193,18 +202,22 @@ class PinterestClient:
     async def _raise_if_upload_error(self, page):
         error_selectors = [
             'text="В этом видео не используется кодировка H.264 или H.265"',
-            'text="H.264"',
-            'text="Safari"',
+            'text="H.264 or H.265"',
+            'text="используйте браузер Safari"',
+            'text="use browser Safari"',
             'text="Something went wrong"',
             'text="Что-то пошло не так"',
         ]
-        for sel in error_selectors:
-            try:
-                text = await page.locator(sel).first.text_content(timeout=1500)
-                if text:
-                    raise RuntimeError(text.strip())
-            except Exception:
-                continue
+        for _ in range(8):
+            for sel in error_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if await loc.is_visible(timeout=1200):
+                        text = (await loc.text_content()) or sel
+                        raise RuntimeError(text.strip())
+                except PlaywrightTimeoutError:
+                    continue
+            await asyncio.sleep(1)
 
     async def _fill_text_fields(self, page, title, description, link):
         await _fill_best_effort(page, title[:100], [
