@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
-PROFILE_CTA = "Ссылка в шапке профиля."
+TELEGRAM_LINK = "https://t.me/+HV8h-Ukgk1pjMTBi"
 
 CONTENT_ANGLES = [
     "автоматизация бизнеса через ИИ",
@@ -34,17 +34,16 @@ async def generate_pin_content() -> tuple[str, str, str]:
 Верни JSON строго в формате:
 {{
   "title": "короткий заголовок до 70 символов",
-  "description": "очень короткое описание 70-140 символов",
-  "hashtags": "6-8 хештегов через пробел, начиная с #"
+  "description": "очень короткое описание 60-120 символов",
+  "hashtags": "5-7 хештегов через пробел, начиная с #"
 }}
 
 Требования:
 - Заголовок: конкретный, цепкий, без воды
-- Описание: 1-2 коротких предложения
-- В конце описания фраза: "{PROFILE_CTA}"
-- Не вставляй ссылок
+- Описание: 1 короткая мысль + новая строка + ссылка {TELEGRAM_LINK}
+- Ссылка должна быть указана как обычный URL, без markdown
 - Не пиши длинно
-- Хештеги: микс русских и английских"""
+- Хештеги: короткий микс русских и английских"""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -57,7 +56,7 @@ async def generate_pin_content() -> tuple[str, str, str]:
                 },
                 json={
                     "model": ANTHROPIC_MODEL,
-                    "max_tokens": 220,
+                    "max_tokens": 180,
                     "system": SYSTEM_PROMPT,
                     "messages": [{"role": "user", "content": user_prompt}],
                 },
@@ -91,13 +90,13 @@ def _fallback_content() -> tuple[str, str, str]:
     fallbacks = [
         (
             "3 ИИ-инструмента для экономии времени",
-            "Рутину можно сократить в разы. Ссылка в шапке профиля.",
-            "#ИИ #Автоматизация #Бизнес #AI #ChatGPT #Productivity #Aitools"
+            "Рутину можно сократить в разы.\nhttps://t.me/+HV8h-Ukgk1pjMTBi",
+            "#ИИ #Автоматизация #Бизнес #AI #ChatGPT #Productivity"
         ),
         (
             "Как ускорить работу с помощью ИИ",
-            "Контент и рутина делаются быстрее. Ссылка в шапке профиля.",
-            "#ИскусственныйИнтеллект #АвтоматизацияБизнеса #AI #Business #Efficiency #ChatGPT"
+            "Контент и рутина делаются быстрее.\nhttps://t.me/+HV8h-Ukgk1pjMTBi",
+            "#ИскусственныйИнтеллект #AI #Business #Efficiency #ChatGPT"
         ),
     ]
     return random.choice(fallbacks)
