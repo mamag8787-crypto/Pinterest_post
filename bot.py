@@ -113,6 +113,18 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Мгновенно запускает публикацию следующего видео из очереди — без ожидания расписания."""
+    if not is_allowed(update.effective_user.id): return
+    stats = await database.get_queue_stats()
+    if stats["pending"] == 0:
+        await update.message.reply_text("📭 Очередь пуста — добавь видео.")
+        return
+    await update.message.reply_text("🚀 Запускаю публикацию прямо сейчас...")
+    from scheduler import post_next_from_queue
+    await post_next_from_queue(context.bot)
+
+
 async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
     count = await database.reset_failed_to_pending()
@@ -259,6 +271,7 @@ def main():
     app.add_handler(CommandHandler("queue",  cmd_queue))
     app.add_handler(CommandHandler("stats",  cmd_stats))
     app.add_handler(CommandHandler("retry",  cmd_retry))
+    app.add_handler(CommandHandler("testpost", cmd_testpost))
     app.add_handler(CommandHandler("pause",  cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("log",    cmd_log))

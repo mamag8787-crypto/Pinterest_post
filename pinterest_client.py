@@ -27,10 +27,8 @@ async def _send_screenshot(page, label="debug"):
         path = f"/tmp/pinterest_{label}.png"
         await page.screenshot(path=path, full_page=False)
         with open(path, "rb") as f:
-            await _bot_instance.send_photo(
-                chat_id=_owner_id, photo=f,
-                caption=f"🔍 {label}\n{page.url}"
-            )
+            await _bot_instance.send_photo(chat_id=_owner_id, photo=f,
+                caption=f"🔍 {label}\n{page.url}")
     except Exception as e:
         logger.error(f"Screenshot failed: {e}")
 
@@ -43,7 +41,7 @@ class PinterestClient:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage",
+                args=["--no-sandbox","--disable-dev-shm-usage",
                       "--disable-blink-features=AutomationControlled"]
             )
             context = await browser.new_context(
@@ -53,8 +51,7 @@ class PinterestClient:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/122.0.0.0 Safari/537.36"
                 ),
-                locale="ru-RU",
-                timezone_id="Europe/Moscow",
+                locale="ru-RU", timezone_id="Europe/Moscow",
             )
             await context.add_init_script(
                 "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
@@ -71,232 +68,202 @@ class PinterestClient:
             page = await context.new_page()
 
             try:
-                # Шаг 1: открываем главную
+                # Логин
                 await page.goto("https://www.pinterest.com/", wait_until="commit", timeout=30000)
                 await asyncio.sleep(3)
-
                 if not await _is_logged_in(page):
                     await _login(page)
                     cookies = await context.cookies()
                     Path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
                     Path(SESSION_FILE).write_text(json.dumps(cookies))
-
                 await _send_screenshot(page, "1_logged_in")
 
-                # Шаг 2: переходим на создание пина (pin-creation-tool для видео)
+                # Узнаём username
+                username = await _get_username(page)
+                logger.info(f"Username: {username}")
+
+                # Открываем страницу доски напрямую
+                board_slug = PINTEREST_BOARD.lower().replace(" ", "-").replace("_", "-")
+                board_url = f"https://www.pinterest.com/{username}/{board_slug}/"
+                logger.info(f"Открываем доску: {board_url}")
+                await page.goto(board_url, wait_until="commit", timeout=30000)
+                await asyncio.sleep(3)
+                await _send_screenshot(page, "2_board_page")
+
+                # Ищем кнопку "+" / "Добавить пин"
+                file_input = None
                 try:
-                    await page.goto("https://www.pinterest.com/pin-creation-tool/", wait_until="domcontentloaded", timeout=30000)
-                    await asyncio.sleep(4)
-                    logger.info(f"pin-creation-tool URL: {page.url}")
-                except Exception as e:
-                    logger.warning(f"pin-creation-tool failed: {e}")
-                    # Запасной: кликаем Создать в меню
-                    await page.goto("https://www.pinterest.com/", wait_until="commit", timeout=30000)
-                    await asyncio.sleep(3)
+                    plus_btn = await page.wait_for_selector(
+                        '[data-test-id="board-add-pin-button"], '
+                        '[aria-label="Добавить пин"], '
+                        '[aria-label="Add Pin"], '
+                        'button[aria-label="Add pin"]',
+                        timeout=8000
+                    )
+                    await plus_btn.click()
+                    await asyncio.sleep(2)
+                    await _send_screenshot(page, "3_after_plus")
+                    # После клика может появиться меню — выбираем "Создать пин"
                     try:
-                        create_btn = await page.wait_for_selector(
-                            "a[href*=pin-creation], [data-test-id='header-create-menu-trigger'], button:has-text('Создать')",
+                        create_pin = await page.wait_for_selector(
+                            'a:has-text("Создать пин"), a:has-text("Create Pin"), '
+                            '[data-test-id="create-pin-button"]',
+                            timeout=4000
+                        )
+                        await create_pin.click()
+                        await asyncio.sleep(3)
+                    except PlaywrightTimeout:
+                        pass  # Возможно сразу открылась форма
+                except PlaywrightTimeout:
+                    logger.warning("Кнопка '+' не найдена, пробуем через верхнее меню")
+                    # Запасной: меню "Создать" в хедере
+                    try:
+                        create_menu = await page.wait_for_selector(
+                            '[data-test-id="header-create-menu-trigger"], '
+                            'button:has-text("Создать"), a:has-text("Создать")',
                             timeout=8000
                         )
-                        await create_btn.click()
-                        await asyncio.sleep(2)
-                        pin_option = await page.wait_for_selector(
-                            "a:has-text('Создать пин'), [href*=pin-creation]", timeout=5000
+                        await create_menu.click()
+                        await asyncio.sleep(1)
+                        pin_item = await page.wait_for_selector(
+                            'a:has-text("Создать пин"), [data-test-id="create-pin"]',
+                            timeout=5000
                         )
-                        await pin_option.click()
+                        await pin_item.click()
                         await asyncio.sleep(3)
-                    except Exception as e2:
-                        logger.warning(f"Menu click failed: {e2}")
-                await _send_screenshot(page, "2_pin_builder")
+                    except PlaywrightTimeout:
+                        pass
 
-                # Шаг 3: закрываем онбординг
-                await _dismiss_onboarding(page)
-                await asyncio.sleep(2)
-                await _send_screenshot(page, "3_after_dismiss")
+                await _send_screenshot(page, "4_create_form")
 
-                # Шаг 4: ищем input[type=file] всеми способами
-                logger.info("Ищем file input...")
-                file_input = None
+                # Ищем input[type=file] — делаем его видимым через JS если скрыт
+                await page.evaluate("""() => {
+                    document.querySelectorAll('input[type="file"]').forEach(el => {
+                        el.style.display = 'block';
+                        el.style.visibility = 'visible';
+                        el.style.opacity = '1';
+                        el.style.width = '100px';
+                        el.style.height = '100px';
+                    });
+                }""")
+                await asyncio.sleep(0.5)
 
-                # Способ A: стандартный поиск
                 try:
-                    file_input = await page.wait_for_selector('input[type="file"]', timeout=10000)
-                    logger.info("File input найден стандартно")
+                    file_input = await page.wait_for_selector('input[type="file"]', timeout=15000)
+                    logger.info("File input найден")
                 except PlaywrightTimeout:
-                    pass
+                    await _send_screenshot(page, "error_no_file_input")
+                    return {"success": False, "error": "Не найден input[type=file]"}
 
-                # Способ B: через evaluate
-                if not file_input:
-                    try:
-                        await page.evaluate("""() => {
-                            const inp = document.querySelector('input[type="file"]');
-                            if (inp) {
-                                inp.style.display = 'block';
-                                inp.style.visibility = 'visible';
-                                inp.style.opacity = '1';
-                            }
-                        }""")
-                        file_input = await page.query_selector('input[type="file"]')
-                        logger.info("File input найден через JS")
-                    except Exception as e:
-                        logger.warning(f"JS file input: {e}")
-
-                if not file_input:
-                    await _send_screenshot(page, "4_no_file_input")
-                    # Логируем HTML для диагностики
-                    html = await page.content()
-                    logger.error(f"HTML (первые 3000 символов): {html[:3000]}")
-                    return {"success": False, "error": "Не найден input[type=file]. Скриншот в TG."}
-
-                # Загружаем файл
+                # Загружаем видео
                 await file_input.set_input_files(video_path)
-                logger.info("Файл передан в input")
+                logger.info("Видео загружено в input")
                 await asyncio.sleep(5)
-                await _send_screenshot(page, "4_after_upload")
+                await _send_screenshot(page, "5_after_upload")
 
-                # Шаг 5: ждём полей формы — пробуем разные селекторы
+                # Ждём полей формы
                 logger.info("Ждём полей формы...")
-                title_selector = None
-                selectors_to_try = [
+                title_field = None
+                for sel in [
                     '[data-test-id="pin-draft-title"]',
-                    '[data-test-id="pin-title-input"]',
-                    'textarea[placeholder*="заголовок"], textarea[placeholder*="title"], textarea[placeholder*="Title"]',
-                    'input[name="title"]',
-                    '[aria-label*="заголовок"], [aria-label*="Title"]',
-                ]
-                for sel in selectors_to_try:
+                    'textarea[placeholder*="название"], textarea[placeholder*="Title"]',
+                    'textarea[placeholder*="Добавьте название"]',
+                    '[aria-label*="название"], [aria-label*="Title"]',
+                    'div[contenteditable][data-test-id*="title"]',
+                ]:
                     try:
-                        await page.wait_for_selector(sel, timeout=30000)
-                        title_selector = sel
-                        logger.info(f"Найден селектор заголовка: {sel}")
+                        await page.wait_for_selector(sel, timeout=60000)
+                        title_field = sel
+                        logger.info(f"Поле заголовка: {sel}")
                         break
                     except PlaywrightTimeout:
-                        logger.info(f"Селектор не найден: {sel}")
                         continue
 
-                if not title_selector:
-                    await _send_screenshot(page, "5_no_title")
-                    html = await page.content()
-                    logger.error(f"HTML после upload (первые 3000): {html[:3000]}")
-                    return {"success": False, "error": "Поле заголовка не найдено. Скриншот в TG."}
+                if not title_field:
+                    await _send_screenshot(page, "error_no_title")
+                    return {"success": False, "error": "Поле заголовка не найдено"}
 
                 await asyncio.sleep(2)
-                await _send_screenshot(page, "5_form_ready")
+                await _send_screenshot(page, "6_form_ready")
 
-                # Заполняем форму
-                title_field = await page.query_selector(title_selector)
-                if title_field:
-                    await title_field.click()
-                    await asyncio.sleep(0.4)
-                    await title_field.type(title[:100], delay=50)
+                # Заполняем
+                tf = await page.query_selector(title_field)
+                if tf:
+                    await tf.click(); await asyncio.sleep(0.3)
+                    await tf.type(title[:100], delay=50)
 
-                # Описание — ищем похожим образом
-                for desc_sel in ['[data-test-id="pin-draft-description"]',
-                                  'textarea[placeholder*="описание"], textarea[placeholder*="description"]',
-                                  '[aria-label*="описание"], [aria-label*="Description"]']:
-                    desc_field = await page.query_selector(desc_sel)
-                    if desc_field:
-                        await desc_field.click()
-                        await asyncio.sleep(0.3)
-                        await desc_field.type(description[:500], delay=30)
+                for ds in ['[data-test-id="pin-draft-description"]',
+                           'textarea[placeholder*="описание"], textarea[placeholder*="описание пина"]',
+                           '[aria-label*="описание"]']:
+                    df = await page.query_selector(ds)
+                    if df:
+                        await df.click(); await asyncio.sleep(0.3)
+                        await df.type(description[:500], delay=30)
                         break
 
-                # Ссылка
                 if link:
-                    for link_sel in ['[data-test-id="pin-draft-link"]',
-                                      'input[placeholder*="ссылк"], input[placeholder*="link"]',
-                                      '[aria-label*="ссылк"], [aria-label*="Link"]']:
-                        link_field = await page.query_selector(link_sel)
-                        if link_field:
-                            await link_field.click()
-                            await asyncio.sleep(0.3)
-                            await link_field.type(link, delay=50)
+                    for ls in ['[data-test-id="pin-draft-link"]',
+                               'input[placeholder*="ссылк"], input[placeholder*="URL"]']:
+                        lf = await page.query_selector(ls)
+                        if lf:
+                            await lf.click(); await asyncio.sleep(0.3)
+                            await lf.type(link, delay=50)
                             break
 
-                # Доска
-                await _select_board(page, PINTEREST_BOARD)
-                await asyncio.sleep(1)
-                await _send_screenshot(page, "6_before_publish")
+                await _send_screenshot(page, "7_filled")
 
                 # Публикуем
-                for pub_sel in ['[data-test-id="board-dropdown-save-button"]',
-                                 'button:has-text("Опубликовать")',
-                                 'button:has-text("Publish")',
-                                 'button:has-text("Save")']:
+                for ps in ['[data-test-id="board-dropdown-save-button"]',
+                           'button:has-text("Опубликовать")', 'button:has-text("Publish")']:
                     try:
-                        btn = await page.wait_for_selector(pub_sel, timeout=5000)
+                        btn = await page.wait_for_selector(ps, timeout=5000)
                         await btn.click()
-                        logger.info(f"Нажали публикацию: {pub_sel}")
+                        logger.info(f"Публикация нажата: {ps}")
                         break
                     except PlaywrightTimeout:
                         continue
 
-                # Ждём успеха
-                try:
-                    await page.wait_for_selector(
-                        '[data-test-id="pin-save-success"], [class*="successToast"], [class*="success"]',
-                        timeout=30000
-                    )
-                except PlaywrightTimeout:
-                    pass
-
-                await asyncio.sleep(3)
-                await _send_screenshot(page, "7_final")
-
+                await asyncio.sleep(5)
+                await _send_screenshot(page, "8_final")
                 pin_id = _extract_pin_id(page.url)
                 return {"success": True, "pin_id": pin_id or "unknown"}
 
             except Exception as e:
                 logger.error(f"Ошибка: {e}")
-                try:
-                    await _send_screenshot(page, "error")
-                except Exception:
-                    pass
+                try: await _send_screenshot(page, "error_final")
+                except Exception: pass
                 return {"success": False, "error": str(e)}
             finally:
                 await browser.close()
 
 
-async def _dismiss_onboarding(page):
-    # Escape
+async def _get_username(page) -> str:
+    """Извлекает username из URL или страницы."""
     try:
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.8)
-    except Exception:
-        pass
-    # JS клик по кнопкам
-    for _ in range(5):
-        try:
-            clicked = await page.evaluate("""() => {
-                const targets = ['Далее', 'Next', 'Начать', 'Done', 'Got it', 'Понятно', 'Закрыть'];
-                const btn = Array.from(document.querySelectorAll('button'))
-                    .find(b => targets.some(t => b.textContent.trim().includes(t)));
-                if (btn) { btn.click(); return true; }
-                return false;
-            }""")
-            if not clicked:
-                break
-            await asyncio.sleep(0.8)
-        except Exception:
-            break
-    # Ядерный: удаляем все диалоги
-    try:
-        await page.evaluate("""() => {
-            document.querySelectorAll('[role="dialog"],[data-test-id*="modal"],[class*="overlay"],[class*="Modal"]')
-                .forEach(el => el.remove());
-        }""")
-        await asyncio.sleep(0.5)
-    except Exception:
-        pass
+        # Из URL business/hub или профиля
+        url = page.url
+        # Переходим на профиль
+        await page.goto("https://www.pinterest.com/me/", wait_until="commit", timeout=15000)
+        await asyncio.sleep(2)
+        username = page.url.rstrip("/").split("/")[-1]
+        if username and username != "me":
+            logger.info(f"Username из URL: {username}")
+            return username
+    except Exception as e:
+        logger.warning(f"_get_username error: {e}")
+    return "me"
 
 
 async def _is_logged_in(page) -> bool:
     url = page.url
-    if "business/hub" in url or ("pinterest.com" in url and "/login" not in url and url != "https://www.pinterest.com/"):
-        logger.info(f"Залогинен (URL: {url})")
+    if any(x in url for x in ["business/hub", "/me/", "pinterest.com/pin"]):
         return True
+    if "login" in url:
+        return False
     try:
-        await page.wait_for_selector('[data-test-id="header-avatar"],[data-test-id="homefeed-feed"]', timeout=5000)
+        await page.wait_for_selector(
+            '[data-test-id="header-avatar"],[data-test-id="homefeed-feed"]', timeout=4000
+        )
         return True
     except PlaywrightTimeout:
         return False
@@ -306,51 +273,21 @@ async def _login(page):
     logger.info("Логинимся...")
     try:
         await page.goto("https://www.pinterest.com/login/", wait_until="commit", timeout=30000)
-    except Exception:
-        pass
+    except Exception: pass
     await asyncio.sleep(3)
     email_input = await page.wait_for_selector('#email', timeout=15000)
-    await email_input.click()
-    await asyncio.sleep(0.5)
+    await email_input.click(); await asyncio.sleep(0.5)
     await email_input.type(PINTEREST_EMAIL, delay=80)
     await asyncio.sleep(0.7)
-    password_input = await page.wait_for_selector('#password', timeout=10000)
-    await password_input.click()
-    await asyncio.sleep(0.5)
-    await password_input.type(PINTEREST_PASSWORD, delay=80)
+    pwd = await page.wait_for_selector('#password', timeout=10000)
+    await pwd.click(); await asyncio.sleep(0.5)
+    await pwd.type(PINTEREST_PASSWORD, delay=80)
     await asyncio.sleep(0.7)
     await page.keyboard.press("Enter")
-    try:
-        await page.wait_for_url("**/", timeout=30000)
-    except Exception:
-        pass
+    try: await page.wait_for_url("**/", timeout=30000)
+    except Exception: pass
     await asyncio.sleep(3)
-    logger.info(f"Логин завершён, URL: {page.url}")
-
-
-async def _select_board(page, board_name: str):
-    for sel in ['[data-test-id="board-dropdown-select-button"]',
-                'button:has-text("Красив")', '[data-test-id*="board"]']:
-        try:
-            btn = await page.wait_for_selector(sel, timeout=8000)
-            await btn.click()
-            await asyncio.sleep(1)
-            break
-        except PlaywrightTimeout:
-            continue
-
-    search = await page.query_selector('[data-test-id="board-search-input"]')
-    if search:
-        await search.type(board_name, delay=60)
-        await asyncio.sleep(1)
-
-    try:
-        option = await page.wait_for_selector(
-            f'[data-test-id="board-row"]:has-text("{board_name}")', timeout=8000
-        )
-        await option.click()
-    except PlaywrightTimeout:
-        logger.warning(f"Доска '{board_name}' не найдена")
+    logger.info(f"Логин: {page.url}")
 
 
 def _extract_pin_id(url: str) -> str:
