@@ -28,15 +28,21 @@ def set_bot(bot):
 
 
 async def _send_screenshot(page, label="debug"):
+    if not DEBUG_SCREENSHOTS:
+        return
     if not _bot_instance or not _owner_id:
         return
     try:
         path = f"/tmp/pinterest_{label}.png"
         await page.screenshot(path=path, full_page=False)
         with open(path, "rb") as f:
-            await _bot_instance.send_photo(chat_id=_owner_id, photo=f, caption=f"🔍 {label}\n{page.url}")
+            await _bot_instance.send_photo(
+                chat_id=_owner_id,
+                photo=f,
+                caption=f"🔍 {label}\n{page.url}"
+            )
     except Exception as e:
-        logger.error("Screenshot failed: %s", e)
+        logger.error(f"Screenshot failed: {e}")
 
 
 def _existing_session_file() -> Path | None:
