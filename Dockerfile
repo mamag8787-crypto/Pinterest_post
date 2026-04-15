@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# Системные зависимости для Chromium
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
     wget curl gnupg \
     libglib2.0-0 \
     libnss3 \
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libpango-1.0-0 \
     libcairo2 \
-    libasound2t64 \
+    libasound2 \
     fonts-liberation \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
@@ -32,8 +32,6 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Устанавливаем Chromium
 RUN playwright install chromium
 
 COPY . .
