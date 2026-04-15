@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
-
+DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
