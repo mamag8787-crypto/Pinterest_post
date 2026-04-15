@@ -1,6 +1,6 @@
-import os
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
 PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME", "").strip()
-SESSION_FILE = os.getenv("SESSION_FILE", "/data/pinterest_state.json")
+SESSION_FILE = Path(os.getenv("SESSION_FILE", "/data/pinterest_state.json"))
+LEGACY_SESSION_FILE = Path("/data/pinterest_session.json")
 PINTEREST_CREATE_URL = os.getenv("PINTEREST_CREATE_URL", "https://www.pinterest.com/pin-creation-tool/")
 PINTEREST_FALLBACK_CREATE_URL = os.getenv("PINTEREST_FALLBACK_CREATE_URL", "https://www.pinterest.com/pin-builder/")
 BOOTSTRAP_LOGIN = os.getenv("PINTEREST_BOOTSTRAP_LOGIN", "0") == "1"
@@ -36,10 +37,15 @@ async def _send_screenshot(page, label="debug"):
         logger.error("Screenshot failed: %s", e)
 
 
-class PinterestClient:
-    def __init__(self, **kwargs):
-        pass
+def _existing_session_file() -> Path | None:
+    if SESSION_FILE.exists() and SESSION_FILE.stat().st_size > 0:
+        return SESSION_FILE
+    if LEGACY_SESSION_FILE.exists() and LEGACY_SESSION_FILE.stat().st_size > 0:
+        return LEGACY_SESSION_FILE
+    return None
 
+
+class PinterestClient:
     async def create_video_pin(self, video_path, title, description, link="") -> dict:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -60,9 +66,11 @@ class PinterestClient:
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
             )
-            if Path(SESSION_FILE).exists():
-                context_kwargs["storage_state"] = SESSION_FILE
-                logger.info("Loading storage_state from %s", SESSION_FILE)
+
+            session_path = _existing_session_file()
+            if session_path:
+                context_kwargs["storage_state"] = str(session_path)
+                logger.info("Загружаю storage_state из %s", session_path)
 
             context = await browser.new_context(**context_kwargs)
             await context.add_init_script(
@@ -84,7 +92,8 @@ class PinterestClient:
                     return {"success": False, "error": "Не найден input[type=file] в pin builder"}
 
                 await file_input.set_input_files(video_path)
-                await asyncio.sleep(8)
+                await asyncio.sleep(10)
+                await self._raise_if_upload_error(page)
                 await _send_screenshot(page, "3_after_upload")
 
                 await self._fill_text_fields(page, title, description, link)
@@ -106,11 +115,11 @@ class PinterestClient:
                 return {"success": False, "error": str(e)}
             finally:
                 try:
-                    Path(SESSION_FILE).parent.mkdir(parents=True, exist_ok=True)
-                    await context.storage_state(path=SESSION_FILE)
-                    logger.info("Saved storage_state to %s", SESSION_FILE)
+                    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    await context.storage_state(path=str(SESSION_FILE))
+                    logger.info("Сохранил storage_state в %s", SESSION_FILE)
                 except Exception as e:
-                    logger.warning("Could not save storage state: %s", e)
+                    logger.warning("Не удалось сохранить storage state: %s", e)
                 await browser.close()
 
     async def _ensure_logged_in(self, page, context):
@@ -119,13 +128,12 @@ class PinterestClient:
         if await _is_logged_in(page):
             return
 
-        # Pinterest login in headless is flaky. Use saved session if possible.
         if BOOTSTRAP_LOGIN:
-            logger.info("Bootstrap login mode enabled. Waiting for manual login.")
+            logger.info("Режим bootstrap-login включён. Жду ручной вход.")
             await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(60000)
             if await _is_logged_in(page):
-                await context.storage_state(path=SESSION_FILE)
+                await context.storage_state(path=str(SESSION_FILE))
                 return
             raise RuntimeError("Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния.")
 
@@ -182,6 +190,22 @@ class PinterestClient:
                 pass
         return None
 
+    async def _raise_if_upload_error(self, page):
+        error_selectors = [
+            'text="В этом видео не используется кодировка H.264 или H.265"',
+            'text="H.264"',
+            'text="Safari"',
+            'text="Something went wrong"',
+            'text="Что-то пошло не так"',
+        ]
+        for sel in error_selectors:
+            try:
+                text = await page.locator(sel).first.text_content(timeout=1500)
+                if text:
+                    raise RuntimeError(text.strip())
+            except Exception:
+                continue
+
     async def _fill_text_fields(self, page, title, description, link):
         await _fill_best_effort(page, title[:100], [
             '[data-test-id="pin-draft-title"]',
@@ -212,12 +236,14 @@ class PinterestClient:
 
     async def _select_board(self, page, board_name: str):
         if not board_name:
-            return
+            raise RuntimeError("Не задан PINTEREST_BOARD_NAME")
         for sel in [
             'button[aria-label*="board" i]',
             'button[aria-label*="доск" i]',
             '[data-test-id*="board-picker"]',
             '[data-test-id*="board-dropdown"]',
+            'div[role="button"]:has-text("Выберите доску")',
+            'div[role="button"]:has-text("Choose board")',
         ]:
             try:
                 await page.locator(sel).first.click(timeout=3000)
