@@ -8,6 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
+logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v4")
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -68,6 +69,7 @@ def _norm_text(value: str) -> str:
         return ""
     value = value.replace("\xa0", " ")
     value = value.replace("_", " ")
+    value = value.replace("-", " ")
     value = re.sub(r"\s+", " ", value)
     return value.strip().lower()
 
@@ -322,7 +324,7 @@ class PinterestClient:
                 pass
 
         if not opened:
-            raise RuntimeError("Не нашёл кнопку выбора доски")
+            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v4]")
 
         await page.wait_for_timeout(1200)
 
@@ -336,6 +338,7 @@ class PinterestClient:
             'input[type="text"]',
         ]
 
+        search_filled = False
         for sel in search_selectors:
             loc = page.locator(sel).first
             try:
@@ -344,9 +347,14 @@ class PinterestClient:
                     await loc.fill("")
                     await loc.fill(board_name)
                     await page.wait_for_timeout(1500)
+                    search_filled = True
+                    logger.info("Поиск доски заполнен через %s", sel)
                     break
             except Exception:
                 pass
+
+        if not search_filled:
+            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v4]")
 
         seen = []
 
@@ -377,155 +385,4 @@ class PinterestClient:
                         continue
 
                     txt = await item.inner_text(timeout=1000)
-                    norm = _norm_text(txt)
-
-                    if not norm:
-                        continue
-
-                    if norm not in seen:
-                        seen.append(norm)
-
-                    if norm == target:
-                        await item.click(timeout=3000)
-                        logger.info("Доска выбрана exact match: %s", txt)
-                        await page.wait_for_timeout(1000)
-                        return
-
-                    if target in norm:
-                        await item.click(timeout=3000)
-                        logger.info("Доска выбрана contains match: %s", txt)
-                        await page.wait_for_timeout(1000)
-                        return
-
-                except Exception:
-                    continue
-
-        clicked = await page.evaluate(
-            """
-            (target) => {
-                function norm(v) {
-                    return (v || "")
-                        .replace(/\\u00a0/g, " ")
-                        .replace(/_/g, " ")
-                        .replace(/\\s+/g, " ")
-                        .trim()
-                        .toLowerCase();
-                }
-
-                const nodes = Array.from(document.querySelectorAll("div, button, span, li"));
-                for (const el of nodes) {
-                    const style = window.getComputedStyle(el);
-                    if (style.display === "none" || style.visibility === "hidden") continue;
-
-                    const txt = norm(el.innerText || el.textContent || "");
-                    if (!txt) continue;
-
-                    if (txt === target || txt.includes(target)) {
-                        el.click();
-                        return txt;
-                    }
-                }
-                return null;
-            }
-            """,
-            target,
-        )
-
-        if clicked:
-            logger.info("Доска выбрана JS fallback: %s", clicked)
-            await page.wait_for_timeout(1000)
-            return
-
-        preview = ", ".join(seen[:25])
-        raise RuntimeError(f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview}")
-
-    async def _publish(self, page):
-        for loc in [
-            page.get_by_role("button", name="Publish"),
-            page.get_by_role("button", name="Опубликовать"),
-            page.get_by_role("button", name="Save"),
-            page.locator('[data-test-id="board-dropdown-save-button"]'),
-            page.locator('button:has-text("Publish")'),
-            page.locator('button:has-text("Опубликовать")'),
-            page.locator('button:has-text("Save")'),
-        ]:
-            try:
-                await loc.first.click(timeout=5000)
-                return
-            except Exception:
-                pass
-
-        raise RuntimeError("Кнопка публикации не найдена")
-
-
-async def _fill_best_effort(page, value: str, selectors: list[str]):
-    if not value:
-        return
-
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            await loc.wait_for(timeout=5000)
-
-            tag_name = await loc.evaluate("el => el.tagName.toLowerCase()")
-            if tag_name in {"input", "textarea"}:
-                await loc.fill(value)
-            else:
-                await loc.click()
-                await page.keyboard.press("Control+A")
-                await page.keyboard.type(value)
-
-            return
-        except Exception:
-            pass
-
-
-async def _is_logged_in(page) -> bool:
-    if "login" in page.url:
-        return False
-
-    for sel in [
-        '[data-test-id="header-avatar"]',
-        '[data-test-id="homefeed-feed"]',
-        '[data-test-id="profile-menu-button"]',
-        'div[data-test-id="header-profile"]',
-        'button[aria-label*="profile" i]',
-    ]:
-        try:
-            await page.locator(sel).first.wait_for(timeout=2500)
-            return True
-        except Exception:
-            pass
-
-    return False
-
-
-async def _login(page):
-    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
-    await asyncio.sleep(3)
-
-    await page.locator("#email").first.fill(PINTEREST_EMAIL)
-    await page.locator("#password").first.fill(PINTEREST_PASSWORD)
-
-    for loc in [
-        page.get_by_role("button", name="Log in"),
-        page.get_by_role("button", name="Войти"),
-        page.locator('button[type="submit"]'),
-    ]:
-        try:
-            await loc.first.click(timeout=5000)
-            break
-        except Exception:
-            pass
-
-    try:
-        await page.wait_for_load_state("networkidle", timeout=30000)
-    except Exception:
-        pass
-
-    await asyncio.sleep(8)
-
-
-def _extract_pin_id(url: str) -> str:
-    m = re.search(r"/pin/(\\d+)/", url)
-    return m.group(1) if m else ""
+                   
