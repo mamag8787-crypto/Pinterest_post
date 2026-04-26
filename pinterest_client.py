@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
-logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v5")
+logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v6")
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -126,7 +126,7 @@ class PinterestClient:
                 file_input = await self._find_file_input(page)
                 if not file_input:
                     await _send_screenshot(page, "error_no_file_input")
-                    return {"success": False, "error": "Не найден input[type=file] в pin builder [boardfix_v5]"}
+                    return {"success": False, "error": "Не найден input[type=file] в pin builder [boardfix_v6]"}
 
                 await file_input.set_input_files(video_path)
                 logger.info("Видео загружено в form input: %s", video_path)
@@ -180,16 +180,18 @@ class PinterestClient:
                 await context.storage_state(path=str(SESSION_FILE))
                 return
 
-            raise RuntimeError("Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [boardfix_v5]")
+            raise RuntimeError(
+                "Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [boardfix_v6]"
+            )
 
         if not PINTEREST_EMAIL or not PINTEREST_PASSWORD:
-            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [boardfix_v5]")
+            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [boardfix_v6]")
 
         await _login(page)
 
         if not await _is_logged_in(page):
             raise RuntimeError(
-                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [boardfix_v5]"
+                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [boardfix_v6]"
             )
 
     async def _open_pin_builder(self, page):
@@ -203,7 +205,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Не удалось открыть pin builder [boardfix_v5]")
+        raise RuntimeError("Не удалось открыть pin builder [boardfix_v6]")
 
     async def _page_has_builder(self, page) -> bool:
         for sel in [
@@ -294,7 +296,7 @@ class PinterestClient:
 
     async def _select_board(self, page, board_name: str):
         if not board_name:
-            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [boardfix_v5]")
+            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [boardfix_v6]")
 
         target = _norm_text(board_name)
         logger.info("Ищу доску Pinterest: %s", board_name)
@@ -304,8 +306,13 @@ class PinterestClient:
             'div[role="button"]:has-text("Select board")',
             'button:has-text("Выберите доску")',
             'button:has-text("Select board")',
+            'text=Выберите доску',
+            'text=Select board',
             '[data-test-id*="board-picker"]',
             '[data-test-id*="board-dropdown"]',
+            '[role="combobox"]',
+            '[aria-haspopup="listbox"]',
+            '[aria-expanded]',
             'button[aria-label*="доск" i]',
             'button[aria-label*="board" i]',
             '[aria-label*="доск" i]',
@@ -313,20 +320,81 @@ class PinterestClient:
         ]
 
         opened = False
+
         for sel in openers:
-            loc = page.locator(sel).first
             try:
-                if await loc.count() > 0:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await loc.is_visible():
                     await loc.click(timeout=4000)
                     opened = True
+                    logger.info("Открыл выбор доски через %s", sel)
                     break
             except Exception:
                 pass
 
         if not opened:
-            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v5]")
+            opened = await page.evaluate(
+                """
+                () => {
+                    function norm(v) {
+                        return (v || "")
+                            .replace(/\\u00a0/g, " ")
+                            .replace(/_/g, " ")
+                            .replace(/-/g, " ")
+                            .replace(/\\s+/g, " ")
+                            .trim()
+                            .toLowerCase();
+                    }
 
-        await page.wait_for_timeout(1200)
+                    const wanted = ["выберите доску", "select board"];
+                    const nodes = Array.from(document.querySelectorAll(
+                        'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
+                    ));
+
+                    for (const el of nodes) {
+                        const style = window.getComputedStyle(el);
+                        if (style.display === "none" || style.visibility === "hidden") continue;
+
+                        const txt = norm(
+                            el.innerText ||
+                            el.textContent ||
+                            el.getAttribute("aria-label") ||
+                            el.getAttribute("placeholder") ||
+                            ""
+                        );
+
+                        if (wanted.some(w => txt.includes(w))) {
+                            el.click();
+                            return true;
+                        }
+                    }
+
+                    const labels = Array.from(document.querySelectorAll("div, span, label, h3"));
+                    for (const el of labels) {
+                        const txt = norm(el.innerText || el.textContent || "");
+                        if (txt === "доска" || txt === "board") {
+                            const parent = el.parentElement || document.body;
+                            const candidates = Array.from(parent.querySelectorAll(
+                                'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
+                            ));
+                            for (const c of candidates) {
+                                const style = window.getComputedStyle(c);
+                                if (style.display === "none" || style.visibility === "hidden") continue;
+                                c.click();
+                                return true;
+                            }
+                        }
+                    }
+
+                    return false;
+                }
+                """
+            )
+
+        if not opened:
+            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v6]")
+
+        await page.wait_for_timeout(1500)
 
         search_selectors = [
             'input[placeholder*="Поиск" i]',
@@ -335,13 +403,14 @@ class PinterestClient:
             'input[aria-label*="Search" i]',
             'input[aria-label*="board" i]',
             'input[aria-label*="доск" i]',
+            'input[role="searchbox"]',
             'input[type="text"]',
         ]
 
         search_filled = False
         for sel in search_selectors:
-            loc = page.locator(sel).first
             try:
+                loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
                     await loc.click(timeout=2000)
                     await loc.fill("")
@@ -354,7 +423,7 @@ class PinterestClient:
                 pass
 
         if not search_filled:
-            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v5]")
+            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v6]")
 
         seen = []
 
@@ -369,16 +438,13 @@ class PinterestClient:
         ]
 
         for sel in candidate_selectors:
-            loc = page.locator(sel)
-
             try:
+                loc = page.locator(sel)
                 count = await loc.count()
             except Exception:
                 continue
 
-            limit = min(count, 120)
-
-            for i in range(limit):
+            for i in range(min(count, 150)):
                 item = loc.nth(i)
                 try:
                     if not await item.is_visible():
@@ -447,7 +513,7 @@ class PinterestClient:
 
         preview = ", ".join(seen[:25])
         raise RuntimeError(
-            f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview} [boardfix_v5]"
+            f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview} [boardfix_v6]"
         )
 
     async def _publish(self, page):
@@ -466,7 +532,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Кнопка публикации не найдена [boardfix_v5]")
+        raise RuntimeError("Кнопка публикации не найдена [boardfix_v6]")
 
 
 async def _fill_best_effort(page, value: str, selectors: list[str]):
