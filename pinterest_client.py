@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
-logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v4")
+logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v5")
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -126,7 +126,7 @@ class PinterestClient:
                 file_input = await self._find_file_input(page)
                 if not file_input:
                     await _send_screenshot(page, "error_no_file_input")
-                    return {"success": False, "error": "Не найден input[type=file] в pin builder"}
+                    return {"success": False, "error": "Не найден input[type=file] в pin builder [boardfix_v5]"}
 
                 await file_input.set_input_files(video_path)
                 logger.info("Видео загружено в form input: %s", video_path)
@@ -180,16 +180,16 @@ class PinterestClient:
                 await context.storage_state(path=str(SESSION_FILE))
                 return
 
-            raise RuntimeError("Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния.")
+            raise RuntimeError("Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [boardfix_v5]")
 
         if not PINTEREST_EMAIL or not PINTEREST_PASSWORD:
-            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD")
+            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [boardfix_v5]")
 
         await _login(page)
 
         if not await _is_logged_in(page):
             raise RuntimeError(
-                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE."
+                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [boardfix_v5]"
             )
 
     async def _open_pin_builder(self, page):
@@ -203,7 +203,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Не удалось открыть pin builder")
+        raise RuntimeError("Не удалось открыть pin builder [boardfix_v5]")
 
     async def _page_has_builder(self, page) -> bool:
         for sel in [
@@ -294,7 +294,7 @@ class PinterestClient:
 
     async def _select_board(self, page, board_name: str):
         if not board_name:
-            raise RuntimeError("Не задан PINTEREST_BOARD_NAME")
+            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [boardfix_v5]")
 
         target = _norm_text(board_name)
         logger.info("Ищу доску Pinterest: %s", board_name)
@@ -324,7 +324,7 @@ class PinterestClient:
                 pass
 
         if not opened:
-            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v4]")
+            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v5]")
 
         await page.wait_for_timeout(1200)
 
@@ -354,7 +354,7 @@ class PinterestClient:
                 pass
 
         if not search_filled:
-            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v4]")
+            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v5]")
 
         seen = []
 
@@ -385,4 +385,158 @@ class PinterestClient:
                         continue
 
                     txt = await item.inner_text(timeout=1000)
-                   
+                    norm = _norm_text(txt)
+
+                    if not norm:
+                        continue
+
+                    if norm not in seen:
+                        seen.append(norm)
+
+                    if norm == target:
+                        await item.click(timeout=3000)
+                        logger.info("Доска выбрана exact match: %s", txt)
+                        await page.wait_for_timeout(1000)
+                        return
+
+                    if target in norm:
+                        await item.click(timeout=3000)
+                        logger.info("Доска выбрана contains match: %s", txt)
+                        await page.wait_for_timeout(1000)
+                        return
+
+                except Exception:
+                    continue
+
+        clicked = await page.evaluate(
+            """
+            (target) => {
+                function norm(v) {
+                    return (v || "")
+                        .replace(/\\u00a0/g, " ")
+                        .replace(/_/g, " ")
+                        .replace(/-/g, " ")
+                        .replace(/\\s+/g, " ")
+                        .trim()
+                        .toLowerCase();
+                }
+
+                const nodes = Array.from(document.querySelectorAll("div, button, span, li"));
+                for (const el of nodes) {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden") continue;
+
+                    const txt = norm(el.innerText || el.textContent || "");
+                    if (!txt) continue;
+
+                    if (txt === target || txt.includes(target)) {
+                        el.click();
+                        return txt;
+                    }
+                }
+                return null;
+            }
+            """,
+            target,
+        )
+
+        if clicked:
+            logger.info("Доска выбрана JS fallback: %s", clicked)
+            await page.wait_for_timeout(1000)
+            return
+
+        preview = ", ".join(seen[:25])
+        raise RuntimeError(
+            f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview} [boardfix_v5]"
+        )
+
+    async def _publish(self, page):
+        for loc in [
+            page.get_by_role("button", name="Publish"),
+            page.get_by_role("button", name="Опубликовать"),
+            page.get_by_role("button", name="Save"),
+            page.locator('[data-test-id="board-dropdown-save-button"]'),
+            page.locator('button:has-text("Publish")'),
+            page.locator('button:has-text("Опубликовать")'),
+            page.locator('button:has-text("Save")'),
+        ]:
+            try:
+                await loc.first.click(timeout=5000)
+                return
+            except Exception:
+                pass
+
+        raise RuntimeError("Кнопка публикации не найдена [boardfix_v5]")
+
+
+async def _fill_best_effort(page, value: str, selectors: list[str]):
+    if not value:
+        return
+
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(timeout=5000)
+
+            tag_name = await loc.evaluate("el => el.tagName.toLowerCase()")
+            if tag_name in {"input", "textarea"}:
+                await loc.fill(value)
+            else:
+                await loc.click()
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type(value)
+
+            return
+        except Exception:
+            pass
+
+
+async def _is_logged_in(page) -> bool:
+    if "login" in page.url:
+        return False
+
+    for sel in [
+        '[data-test-id="header-avatar"]',
+        '[data-test-id="homefeed-feed"]',
+        '[data-test-id="profile-menu-button"]',
+        'div[data-test-id="header-profile"]',
+        'button[aria-label*="profile" i]',
+    ]:
+        try:
+            await page.locator(sel).first.wait_for(timeout=2500)
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
+async def _login(page):
+    await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
+    await asyncio.sleep(3)
+
+    await page.locator("#email").first.fill(PINTEREST_EMAIL)
+    await page.locator("#password").first.fill(PINTEREST_PASSWORD)
+
+    for loc in [
+        page.get_by_role("button", name="Log in"),
+        page.get_by_role("button", name="Войти"),
+        page.locator('button[type="submit"]'),
+    ]:
+        try:
+            await loc.first.click(timeout=5000)
+            break
+        except Exception:
+            pass
+
+    try:
+        await page.wait_for_load_state("networkidle", timeout=30000)
+    except Exception:
+        pass
+
+    await asyncio.sleep(8)
+
+
+def _extract_pin_id(url: str) -> str:
+    m = re.search(r"/pin/(\\d+)/", url)
+    return m.group(1) if m else ""
