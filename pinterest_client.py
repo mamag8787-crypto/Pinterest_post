@@ -372,7 +372,7 @@ class PinterestClient:
                     const labels = Array.from(document.querySelectorAll("div, span, label, h3"));
                     for (const el of labels) {
                         const txt = norm(el.innerText || el.textContent || "");
-                        if (txt === "доска" || txt === "board") {
+                        if (txt == "доска" || txt == "board") {
                             const parent = el.parentElement || document.body;
                             const candidates = Array.from(parent.querySelectorAll(
                                 'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
@@ -390,9 +390,6 @@ class PinterestClient:
                 }
                 """
             )
-
-        if not opened:
-            raise RuntimeError("Не нашёл кнопку выбора доски [boardfix_v6]")
 
         await page.wait_for_timeout(1500)
 
@@ -512,6 +509,12 @@ class PinterestClient:
             return
 
         preview = ", ".join(seen[:25])
+
+        if not opened:
+            raise RuntimeError(
+                f"Не нашёл кнопку выбора доски. Видимые варианты: {preview} [boardfix_v6]"
+            )
+
         raise RuntimeError(
             f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview} [boardfix_v6]"
         )
