@@ -1,19 +1,30 @@
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
 PINTEREST_BOARD = os.getenv("PINTEREST_BOARD_NAME", "").strip()
+
 SESSION_FILE = Path(os.getenv("SESSION_FILE", "/data/pinterest_state.json"))
 LEGACY_SESSION_FILE = Path("/data/pinterest_session.json")
-PINTEREST_CREATE_URL = os.getenv("PINTEREST_CREATE_URL", "https://www.pinterest.com/pin-creation-tool/")
-PINTEREST_FALLBACK_CREATE_URL = os.getenv("PINTEREST_FALLBACK_CREATE_URL", "https://www.pinterest.com/pin-builder/")
+
+PINTEREST_CREATE_URL = os.getenv(
+    "PINTEREST_CREATE_URL",
+    "https://www.pinterest.com/pin-creation-tool/",
+)
+PINTEREST_FALLBACK_CREATE_URL = os.getenv(
+    "PINTEREST_FALLBACK_CREATE_URL",
+    "https://www.pinterest.com/pin-builder/",
+)
+
 BOOTSTRAP_LOGIN = os.getenv("PINTEREST_BOOTSTRAP_LOGIN", "0") == "1"
 BROWSER_CHANNEL = os.getenv("PINTEREST_BROWSER_CHANNEL", "chrome").strip() or "chrome"
 BROWSER_EXECUTABLE_PATH = os.getenv("PINTEREST_EXECUTABLE_PATH", "").strip() or None
@@ -39,10 +50,10 @@ async def _send_screenshot(page, label="debug"):
             await _bot_instance.send_photo(
                 chat_id=_owner_id,
                 photo=f,
-                caption=f"🔍 {label}\n{page.url}"
+                caption=f"🔍 {label}\n{page.url}",
             )
     except Exception as e:
-        logger.error(f"Screenshot failed: {e}")
+        logger.error("Screenshot failed: %s", e)
 
 
 def _existing_session_file() -> Path | None:
@@ -50,6 +61,15 @@ def _existing_session_file() -> Path | None:
         if candidate.exists() and candidate.stat().st_size > 0:
             return candidate
     return None
+
+
+def _norm_text(value: str) -> str:
+    if not value:
+        return ""
+    value = value.replace("\xa0", " ")
+    value = value.replace("_", " ")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip().lower()
 
 
 class PinterestClient:
@@ -64,6 +84,7 @@ class PinterestClient:
                     "--disable-blink-features=AutomationControlled",
                 ],
             }
+
             if BROWSER_EXECUTABLE_PATH:
                 launch_kwargs["executable_path"] = BROWSER_EXECUTABLE_PATH
 
@@ -108,6 +129,7 @@ class PinterestClient:
                 await file_input.set_input_files(video_path)
                 logger.info("Видео загружено в form input: %s", video_path)
                 await asyncio.sleep(10)
+
                 await self._raise_if_upload_error(page)
                 await _send_screenshot(page, "3_after_upload")
 
@@ -121,6 +143,7 @@ class PinterestClient:
 
                 pin_id = _extract_pin_id(page.url)
                 return {"success": True, "pin_id": pin_id or "unknown"}
+
             except Exception as e:
                 logger.exception("Pinterest browser publish failed")
                 try:
@@ -128,6 +151,7 @@ class PinterestClient:
                 except Exception:
                     pass
                 return {"success": False, "error": str(e)}
+
             finally:
                 try:
                     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -135,11 +159,13 @@ class PinterestClient:
                     logger.info("Сохранил storage_state в %s", SESSION_FILE)
                 except Exception as e:
                     logger.warning("Не удалось сохранить storage state: %s", e)
+
                 await browser.close()
 
     async def _ensure_logged_in(self, page, context):
         await page.goto("https://www.pinterest.com/", wait_until="domcontentloaded", timeout=45000)
         await asyncio.sleep(4)
+
         if await _is_logged_in(page):
             return
 
@@ -147,15 +173,18 @@ class PinterestClient:
             logger.info("Режим bootstrap-login включён. Жду ручной вход.")
             await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
             await page.wait_for_timeout(60000)
+
             if await _is_logged_in(page):
                 await context.storage_state(path=str(SESSION_FILE))
                 return
+
             raise RuntimeError("Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния.")
 
         if not PINTEREST_EMAIL or not PINTEREST_PASSWORD:
             raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD")
 
         await _login(page)
+
         if not await _is_logged_in(page):
             raise RuntimeError(
                 "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE."
@@ -166,10 +195,12 @@ class PinterestClient:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await asyncio.sleep(4)
+
                 if await self._page_has_builder(page):
                     return
             except Exception:
                 pass
+
         raise RuntimeError("Не удалось открыть pin builder")
 
     async def _page_has_builder(self, page) -> bool:
@@ -184,6 +215,7 @@ class PinterestClient:
                 return True
             except Exception:
                 pass
+
         return "pin-builder" in page.url or "pin-creation-tool" in page.url
 
     async def _find_file_input(self, page):
@@ -196,6 +228,7 @@ class PinterestClient:
                 });
             }"""
         )
+
         for sel in ['input[type="file"]', 'input[accept*="video"]', 'input[accept*="image"]']:
             try:
                 loc = page.locator(sel).first
@@ -203,6 +236,7 @@ class PinterestClient:
                 return loc
             except Exception:
                 pass
+
         return None
 
     async def _raise_if_upload_error(self, page):
@@ -214,6 +248,7 @@ class PinterestClient:
             'text="Something went wrong"',
             'text="Что-то пошло не так"',
         ]
+
         for _ in range(8):
             for sel in error_selectors:
                 try:
@@ -236,6 +271,7 @@ class PinterestClient:
             '[aria-label*="назв" i]',
             'div[contenteditable="true"][data-test-id*="title"]',
         ])
+
         await _fill_best_effort(page, description[:500], [
             '[data-test-id="pin-draft-description"]',
             'textarea[placeholder*="description" i]',
@@ -244,6 +280,7 @@ class PinterestClient:
             '[aria-label*="опис" i]',
             'div[contenteditable="true"][data-test-id*="description"]',
         ])
+
         if link:
             await _fill_best_effort(page, link, [
                 '[data-test-id="pin-draft-link"]',
@@ -256,47 +293,151 @@ class PinterestClient:
     async def _select_board(self, page, board_name: str):
         if not board_name:
             raise RuntimeError("Не задан PINTEREST_BOARD_NAME")
-        for sel in [
-            'button[aria-label*="board" i]',
-            'button[aria-label*="доск" i]',
+
+        target = _norm_text(board_name)
+        logger.info("Ищу доску Pinterest: %s", board_name)
+
+        openers = [
+            'div[role="button"]:has-text("Выберите доску")',
+            'div[role="button"]:has-text("Select board")',
+            'button:has-text("Выберите доску")',
+            'button:has-text("Select board")',
             '[data-test-id*="board-picker"]',
             '[data-test-id*="board-dropdown"]',
-            'div[role="button"]:has-text("Выберите доску")',
-            'div[role="button"]:has-text("Choose board")',
-        ]:
+            'button[aria-label*="доск" i]',
+            'button[aria-label*="board" i]',
+            '[aria-label*="доск" i]',
+            '[aria-label*="board" i]',
+        ]
+
+        opened = False
+        for sel in openers:
+            loc = page.locator(sel).first
             try:
-                await page.locator(sel).first.click(timeout=3000)
-                await asyncio.sleep(1)
-                break
+                if await loc.count() > 0:
+                    await loc.click(timeout=4000)
+                    opened = True
+                    break
             except Exception:
                 pass
 
-        for sel in [
-            'input[placeholder*="search" i]',
-            'input[placeholder*="иск" i]',
+        if not opened:
+            raise RuntimeError("Не нашёл кнопку выбора доски")
+
+        await page.wait_for_timeout(1200)
+
+        search_selectors = [
+            'input[placeholder*="Поиск" i]',
+            'input[placeholder*="Search" i]',
+            'input[aria-label*="Поиск" i]',
+            'input[aria-label*="Search" i]',
             'input[aria-label*="board" i]',
             'input[aria-label*="доск" i]',
-        ]:
+            'input[type="text"]',
+        ]
+
+        for sel in search_selectors:
+            loc = page.locator(sel).first
             try:
-                await page.locator(sel).first.fill(board_name, timeout=3000)
-                await asyncio.sleep(1)
-                break
+                if await loc.count() > 0 and await loc.is_visible():
+                    await loc.click(timeout=2000)
+                    await loc.fill("")
+                    await loc.fill(board_name)
+                    await page.wait_for_timeout(1500)
+                    break
             except Exception:
                 pass
 
-        for loc in [
-            page.get_by_role("option", name=board_name),
-            page.get_by_role("button", name=board_name),
-            page.get_by_role("link", name=board_name),
-            page.locator(f'text="{board_name}"'),
-        ]:
+        seen = []
+
+        candidate_selectors = [
+            '[role="option"]',
+            '[data-test-id*="board"]',
+            'div[role="button"]',
+            'button',
+            'li',
+            'div',
+            'span',
+        ]
+
+        for sel in candidate_selectors:
+            loc = page.locator(sel)
+
             try:
-                await loc.first.click(timeout=5000)
-                await asyncio.sleep(1)
-                return
+                count = await loc.count()
             except Exception:
-                pass
-        raise RuntimeError(f"Не нашёл доску '{board_name}' в списке")
+                continue
+
+            limit = min(count, 120)
+
+            for i in range(limit):
+                item = loc.nth(i)
+                try:
+                    if not await item.is_visible():
+                        continue
+
+                    txt = await item.inner_text(timeout=1000)
+                    norm = _norm_text(txt)
+
+                    if not norm:
+                        continue
+
+                    if norm not in seen:
+                        seen.append(norm)
+
+                    if norm == target:
+                        await item.click(timeout=3000)
+                        logger.info("Доска выбрана exact match: %s", txt)
+                        await page.wait_for_timeout(1000)
+                        return
+
+                    if target in norm:
+                        await item.click(timeout=3000)
+                        logger.info("Доска выбрана contains match: %s", txt)
+                        await page.wait_for_timeout(1000)
+                        return
+
+                except Exception:
+                    continue
+
+        clicked = await page.evaluate(
+            """
+            (target) => {
+                function norm(v) {
+                    return (v || "")
+                        .replace(/\\u00a0/g, " ")
+                        .replace(/_/g, " ")
+                        .replace(/\\s+/g, " ")
+                        .trim()
+                        .toLowerCase();
+                }
+
+                const nodes = Array.from(document.querySelectorAll("div, button, span, li"));
+                for (const el of nodes) {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden") continue;
+
+                    const txt = norm(el.innerText || el.textContent || "");
+                    if (!txt) continue;
+
+                    if (txt === target || txt.includes(target)) {
+                        el.click();
+                        return txt;
+                    }
+                }
+                return null;
+            }
+            """,
+            target,
+        )
+
+        if clicked:
+            logger.info("Доска выбрана JS fallback: %s", clicked)
+            await page.wait_for_timeout(1000)
+            return
+
+        preview = ", ".join(seen[:25])
+        raise RuntimeError(f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview}")
 
     async def _publish(self, page):
         for loc in [
@@ -313,16 +454,19 @@ class PinterestClient:
                 return
             except Exception:
                 pass
+
         raise RuntimeError("Кнопка публикации не найдена")
 
 
 async def _fill_best_effort(page, value: str, selectors: list[str]):
     if not value:
         return
+
     for sel in selectors:
         try:
             loc = page.locator(sel).first
             await loc.wait_for(timeout=5000)
+
             tag_name = await loc.evaluate("el => el.tagName.toLowerCase()")
             if tag_name in {"input", "textarea"}:
                 await loc.fill(value)
@@ -330,6 +474,7 @@ async def _fill_best_effort(page, value: str, selectors: list[str]):
                 await loc.click()
                 await page.keyboard.press("Control+A")
                 await page.keyboard.type(value)
+
             return
         except Exception:
             pass
@@ -338,6 +483,7 @@ async def _fill_best_effort(page, value: str, selectors: list[str]):
 async def _is_logged_in(page) -> bool:
     if "login" in page.url:
         return False
+
     for sel in [
         '[data-test-id="header-avatar"]',
         '[data-test-id="homefeed-feed"]',
@@ -350,14 +496,17 @@ async def _is_logged_in(page) -> bool:
             return True
         except Exception:
             pass
+
     return False
 
 
 async def _login(page):
     await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
     await asyncio.sleep(3)
-    await page.locator('#email').first.fill(PINTEREST_EMAIL)
-    await page.locator('#password').first.fill(PINTEREST_PASSWORD)
+
+    await page.locator("#email").first.fill(PINTEREST_EMAIL)
+    await page.locator("#password").first.fill(PINTEREST_PASSWORD)
+
     for loc in [
         page.get_by_role("button", name="Log in"),
         page.get_by_role("button", name="Войти"),
@@ -368,14 +517,15 @@ async def _login(page):
             break
         except Exception:
             pass
+
     try:
         await page.wait_for_load_state("networkidle", timeout=30000)
     except Exception:
         pass
+
     await asyncio.sleep(8)
 
 
 def _extract_pin_id(url: str) -> str:
-    import re
-    m = re.search(r'/pin/(\d+)/', url)
+    m = re.search(r"/pin/(\\d+)/", url)
     return m.group(1) if m else ""
