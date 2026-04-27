@@ -126,7 +126,10 @@ class PinterestClient:
                 file_input = await self._find_file_input(page)
                 if not file_input:
                     await _send_screenshot(page, "error_no_file_input")
-                    return {"success": False, "error": "Не найден input[type=file] в pin builder [boardfix_v6]"}
+                    return {
+                        "success": False,
+                        "error": "Не найден input[type=file] в pin builder [boardfix_v6]",
+                    }
 
                 await file_input.set_input_files(video_path)
                 logger.info("Видео загружено в form input: %s", video_path)
@@ -173,7 +176,11 @@ class PinterestClient:
 
         if BOOTSTRAP_LOGIN:
             logger.info("Режим bootstrap-login включён. Жду ручной вход.")
-            await page.goto("https://www.pinterest.com/login/", wait_until="domcontentloaded", timeout=45000)
+            await page.goto(
+                "https://www.pinterest.com/login/",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
             await page.wait_for_timeout(60000)
 
             if await _is_logged_in(page):
@@ -233,7 +240,11 @@ class PinterestClient:
             }"""
         )
 
-        for sel in ['input[type="file"]', 'input[accept*="video"]', 'input[accept*="image"]']:
+        for sel in [
+            'input[type="file"]',
+            'input[accept*="video"]',
+            'input[accept*="image"]',
+        ]:
             try:
                 loc = page.locator(sel).first
                 await loc.wait_for(timeout=12000)
@@ -372,7 +383,7 @@ class PinterestClient:
                     const labels = Array.from(document.querySelectorAll("div, span, label, h3"));
                     for (const el of labels) {
                         const txt = norm(el.innerText || el.textContent || "");
-                        if (txt == "доска" || txt == "board") {
+                        if (txt === "доска" || txt === "board") {
                             const parent = el.parentElement || document.body;
                             const candidates = Array.from(parent.querySelectorAll(
                                 'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
