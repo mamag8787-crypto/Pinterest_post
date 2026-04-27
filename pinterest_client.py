@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
-logger.warning("PINTEREST_CLIENT_VERSION=boardfix_v6")
+logger.warning("PINTEREST_CLIENT_VERSION=final_clean_v1")
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -44,6 +44,7 @@ async def _send_screenshot(page, label="debug"):
         return
     if not _bot_instance or not _owner_id:
         return
+
     try:
         path = f"/tmp/pinterest_{label}.png"
         await page.screenshot(path=path, full_page=False)
@@ -72,6 +73,37 @@ def _norm_text(value: str) -> str:
     value = value.replace("-", " ")
     value = re.sub(r"\s+", " ", value)
     return value.strip().lower()
+
+
+def _is_bad_board_text(norm: str) -> bool:
+    if not norm:
+        return True
+
+    bad_tokens = (
+        "черновик",
+        "черновики",
+        "черновики пина",
+        "срок действия",
+        "дней до истечения",
+        "дня до истечения",
+        "день до истечения",
+        "выбрать все",
+        "создать доску",
+        "создать",
+        "найдена доска",
+        "publish",
+        "опубликовать",
+        "save",
+        "сохранить",
+    )
+
+    if any(token in norm for token in bad_tokens):
+        return True
+
+    if re.fullmatch(r"\d+:\d+", norm):
+        return True
+
+    return False
 
 
 class PinterestClient:
@@ -128,7 +160,7 @@ class PinterestClient:
                     await _send_screenshot(page, "error_no_file_input")
                     return {
                         "success": False,
-                        "error": "Не найден input[type=file] в pin builder [boardfix_v6]",
+                        "error": "Не найден input[type=file] в pin builder [final_clean_v1]",
                     }
 
                 await file_input.set_input_files(video_path)
@@ -188,17 +220,17 @@ class PinterestClient:
                 return
 
             raise RuntimeError(
-                "Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [boardfix_v6]"
+                "Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [final_clean_v1]"
             )
 
         if not PINTEREST_EMAIL or not PINTEREST_PASSWORD:
-            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [boardfix_v6]")
+            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [final_clean_v1]")
 
         await _login(page)
 
         if not await _is_logged_in(page):
             raise RuntimeError(
-                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [boardfix_v6]"
+                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [final_clean_v1]"
             )
 
     async def _open_pin_builder(self, page):
@@ -212,7 +244,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Не удалось открыть pin builder [boardfix_v6]")
+        raise RuntimeError("Не удалось открыть pin builder [final_clean_v1]")
 
     async def _page_has_builder(self, page) -> bool:
         for sel in [
@@ -307,7 +339,7 @@ class PinterestClient:
 
     async def _select_board(self, page, board_name: str):
         if not board_name:
-            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [boardfix_v6]")
+            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [final_clean_v1]")
 
         target = _norm_text(board_name)
         logger.info("Ищу доску Pinterest: %s", board_name)
@@ -322,8 +354,6 @@ class PinterestClient:
             '[data-test-id*="board-picker"]',
             '[data-test-id*="board-dropdown"]',
             '[role="combobox"]',
-            '[aria-haspopup="listbox"]',
-            '[aria-expanded]',
             'button[aria-label*="доск" i]',
             'button[aria-label*="board" i]',
             '[aria-label*="доск" i]',
@@ -331,7 +361,6 @@ class PinterestClient:
         ]
 
         opened = False
-
         for sel in openers:
             try:
                 loc = page.locator(sel).first
@@ -344,65 +373,9 @@ class PinterestClient:
                 pass
 
         if not opened:
-            opened = await page.evaluate(
-                """
-                () => {
-                    function norm(v) {
-                        return (v || "")
-                            .replace(/\\u00a0/g, " ")
-                            .replace(/_/g, " ")
-                            .replace(/-/g, " ")
-                            .replace(/\\s+/g, " ")
-                            .trim()
-                            .toLowerCase();
-                    }
+            raise RuntimeError("Не нашёл кнопку выбора доски [final_clean_v1]")
 
-                    const wanted = ["выберите доску", "select board"];
-                    const nodes = Array.from(document.querySelectorAll(
-                        'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
-                    ));
-
-                    for (const el of nodes) {
-                        const style = window.getComputedStyle(el);
-                        if (style.display === "none" || style.visibility === "hidden") continue;
-
-                        const txt = norm(
-                            el.innerText ||
-                            el.textContent ||
-                            el.getAttribute("aria-label") ||
-                            el.getAttribute("placeholder") ||
-                            ""
-                        );
-
-                        if (wanted.some(w => txt.includes(w))) {
-                            el.click();
-                            return true;
-                        }
-                    }
-
-                    const labels = Array.from(document.querySelectorAll("div, span, label, h3"));
-                    for (const el of labels) {
-                        const txt = norm(el.innerText || el.textContent || "");
-                        if (txt === "доска" || txt === "board") {
-                            const parent = el.parentElement || document.body;
-                            const candidates = Array.from(parent.querySelectorAll(
-                                'button, div, input, span, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]'
-                            ));
-                            for (const c of candidates) {
-                                const style = window.getComputedStyle(c);
-                                if (style.display === "none" || style.visibility === "hidden") continue;
-                                c.click();
-                                return true;
-                            }
-                        }
-                    }
-
-                    return false;
-                }
-                """
-            )
-
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(1200)
 
         search_selectors = [
             'input[placeholder*="Поиск" i]',
@@ -431,10 +404,9 @@ class PinterestClient:
                 pass
 
         if not search_filled:
-            logger.warning("Не нашёл поле поиска доски, продолжаю без него [boardfix_v6]")
+            logger.warning("Не нашёл поле поиска доски, продолжаю без него [final_clean_v1]")
 
         seen = []
-
         candidate_selectors = [
             '[role="option"]',
             '[data-test-id*="board"]',
@@ -445,6 +417,7 @@ class PinterestClient:
             'span',
         ]
 
+        # exact match first
         for sel in candidate_selectors:
             try:
                 loc = page.locator(sel)
@@ -452,7 +425,7 @@ class PinterestClient:
             except Exception:
                 continue
 
-            for i in range(min(count, 150)):
+            for i in range(min(count, 200)):
                 item = loc.nth(i)
                 try:
                     if not await item.is_visible():
@@ -461,7 +434,7 @@ class PinterestClient:
                     txt = await item.inner_text(timeout=1000)
                     norm = _norm_text(txt)
 
-                    if not norm:
+                    if not norm or _is_bad_board_text(norm):
                         continue
 
                     if norm not in seen:
@@ -472,19 +445,43 @@ class PinterestClient:
                         logger.info("Доска выбрана exact match: %s", txt)
                         await page.wait_for_timeout(1000)
                         return
+                except Exception:
+                    continue
 
-                    if target in norm:
+        # contains match second
+        for sel in candidate_selectors:
+            try:
+                loc = page.locator(sel)
+                count = await loc.count()
+            except Exception:
+                continue
+
+            for i in range(min(count, 200)):
+                item = loc.nth(i)
+                try:
+                    if not await item.is_visible():
+                        continue
+
+                    txt = await item.inner_text(timeout=1000)
+                    norm = _norm_text(txt)
+
+                    if not norm or _is_bad_board_text(norm):
+                        continue
+
+                    if norm not in seen:
+                        seen.append(norm)
+
+                    if target in norm and len(norm) < 120:
                         await item.click(timeout=3000)
                         logger.info("Доска выбрана contains match: %s", txt)
                         await page.wait_for_timeout(1000)
                         return
-
                 except Exception:
                     continue
 
         clicked = await page.evaluate(
             """
-            (target) => {
+            ({ target, badTokens }) => {
                 function norm(v) {
                     return (v || "")
                         .replace(/\\u00a0/g, " ")
@@ -495,23 +492,61 @@ class PinterestClient:
                         .toLowerCase();
                 }
 
-                const nodes = Array.from(document.querySelectorAll("div, button, span, li"));
+                const nodes = Array.from(document.querySelectorAll("[role='option'], div, button, span, li"));
+
                 for (const el of nodes) {
                     const style = window.getComputedStyle(el);
                     if (style.display === "none" || style.visibility === "hidden") continue;
 
                     const txt = norm(el.innerText || el.textContent || "");
                     if (!txt) continue;
+                    if (badTokens.some(token => txt.includes(token))) continue;
+                    if (/^\\d+:\\d+$/.test(txt)) continue;
 
-                    if (txt === target || txt.includes(target)) {
+                    if (txt === target) {
                         el.click();
                         return txt;
                     }
                 }
+
+                for (const el of nodes) {
+                    const style = window.getComputedStyle(el);
+                    if (style.display === "none" || style.visibility === "hidden") continue;
+
+                    const txt = norm(el.innerText || el.textContent || "");
+                    if (!txt) continue;
+                    if (badTokens.some(token => txt.includes(token))) continue;
+                    if (/^\\d+:\\d+$/.test(txt)) continue;
+
+                    if (txt.includes(target) && txt.length < 120) {
+                        el.click();
+                        return txt;
+                    }
+                }
+
                 return null;
             }
             """,
-            target,
+            {
+                "target": target,
+                "badTokens": [
+                    "черновик",
+                    "черновики",
+                    "черновики пина",
+                    "срок действия",
+                    "дней до истечения",
+                    "дня до истечения",
+                    "день до истечения",
+                    "выбрать все",
+                    "создать доску",
+                    "создать",
+                    "найдена доска",
+                    "publish",
+                    "опубликовать",
+                    "save",
+                    "сохранить",
+                ],
+            },
         )
 
         if clicked:
@@ -519,15 +554,9 @@ class PinterestClient:
             await page.wait_for_timeout(1000)
             return
 
-        preview = ", ".join(seen[:25])
-
-        if not opened:
-            raise RuntimeError(
-                f"Не нашёл кнопку выбора доски. Видимые варианты: {preview} [boardfix_v6]"
-            )
-
+        preview = ", ".join(seen[:20])
         raise RuntimeError(
-            f"Не нашёл доску '{board_name}' в списке. Видимые варианты: {preview} [boardfix_v6]"
+            f"Не нашёл доску '{board_name}' в списке. Чистые варианты: {preview} [final_clean_v1]"
         )
 
     async def _publish(self, page):
@@ -546,7 +575,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Кнопка публикации не найдена [boardfix_v6]")
+        raise RuntimeError("Кнопка публикации не найдена [final_clean_v1]")
 
 
 async def _fill_best_effort(page, value: str, selectors: list[str]):
