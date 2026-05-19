@@ -24,6 +24,9 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_DELAY_MIN = int(os.getenv("RETRY_DELAY_MIN", "60"))
 TELEGRAM_LINK = os.getenv("TELEGRAM_CHANNEL_LINK", "https://t.me/yourchannel")
 
+# pinterest UI не ретраим, чтобы не плодить черновики
+NO_RETRY_STAGES = {"Pinterest", "публикации"}
+
 
 def get_post_times() -> list[tuple[int, int]]:
     if POSTS_PER_DAY == 1:
@@ -37,6 +40,18 @@ def get_post_times() -> list[tuple[int, int]]:
         times.append((total // 60, total % 60))
 
     return times
+
+
+def _clean_error_text(error: str, limit: int = 220) -> str:
+    text = " ".join(str(error).split())
+
+    if "api.anthropic.com" in text and "404" in text:
+        text = "Anthropic API вернул 404"
+
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+
+    return text
 
 
 async def post_next_from_queue(bot, scheduler=None):
@@ -194,18 +209,20 @@ async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, sched
     stats = await database.get_queue_stats()
     pending = stats["pending"]
     days_left = pending // POSTS_PER_DAY + (1 if pending % POSTS_PER_DAY else 0)
+    reason = _clean_error_text(error)
 
     logger.error(
         "Ошибка на этапе %s для queue_id=%s: %s",
         stage,
         queue_id,
-        error,
+        reason,
     )
 
-    if retry_count < MAX_RETRIES:
-        next_try = retry_count + 1
+    can_retry = stage not in NO_RETRY_STAGES and retry_count < MAX_RETRIES
 
-        await database.mark_retry(queue_id, error)
+    if can_retry:
+        next_try = retry_count + 1
+        await database.mark_retry(queue_id, reason)
 
         if scheduler:
             run_at = datetime.now() + timedelta(minutes=RETRY_DELAY_MIN)
@@ -219,23 +236,25 @@ async def _handle_error(bot, queue_id, file_unique_id, retry_count, error, sched
 
         report = (
             f"⚠️ Не опубликовано\n"
+            f"Этап: {stage}\n"
+            f"Причина: {reason}\n"
             f"В очереди: {pending}\n"
             f"Хватит примерно на: {days_left} дн.\n"
             f"Повтор: {next_try}/{MAX_RETRIES}"
         )
-
         await _notify(bot, report)
+        return
 
-    else:
-        await database.mark_failed(queue_id, file_unique_id, error)
+    await database.mark_failed(queue_id, file_unique_id, reason)
 
-        report = (
-            f"❌ Не опубликовано\n"
-            f"В очереди: {pending}\n"
-            f"Хватит примерно на: {days_left} дн."
-        )
-
-        await _notify(bot, report)
+    report = (
+        f"❌ Не опубликовано\n"
+        f"Этап: {stage}\n"
+        f"Причина: {reason}\n"
+        f"В очереди: {pending}\n"
+        f"Хватит примерно на: {days_left} дн."
+    )
+    await _notify(bot, report)
 
 
 async def send_weekly_stats(bot):
