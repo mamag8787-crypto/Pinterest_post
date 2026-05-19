@@ -28,7 +28,8 @@ class MonthlyFileHandler(logging.handlers.BaseRotatingHandler):
         return self.baseFilename != _make_log_filename()
 
     def doRollover(self):
-        self.stream.close()
+        if self.stream:
+            self.stream.close()
         self.baseFilename = _make_log_filename()
         self.stream = self._open()
 
@@ -38,8 +39,15 @@ file_handler = MonthlyFileHandler()
 file_handler.setFormatter(fmt)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(fmt)
+
 logging.basicConfig(level=logging.INFO, handlers=[console_handler, file_handler])
 logger = logging.getLogger(__name__)
+
+# режем шумные логи
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = int(os.getenv("ALLOWED_USER_ID", "0"))
@@ -53,6 +61,35 @@ VIDEO_DOC_EXTENSIONS = {
 }
 
 
+IMPORTANT_LOG_KEYWORDS = (
+    "PINTEREST_CLIENT_VERSION",
+    "Бот запущен",
+    "БД готова",
+    "Слот постинга",
+    "Публикую queue_id=",
+    "Видео скачано",
+    "Видео обработано",
+    "Контент готов",
+    "Запускаю браузер",
+    "Загружаю storage_state",
+    "Видео загружено",
+    "Ищу доску Pinterest",
+    "Открыл выбор доски",
+    "Поиск доски заполнен",
+    "Доска выбрана",
+    "Post success",
+    "Ошибка на этапе",
+    "Pinterest browser publish failed",
+    "Notify start",
+    "Notify success",
+    "Notify failed",
+    "Очередь пуста",
+    "Постинг на паузе",
+    "RuntimeError",
+    "Traceback",
+)
+
+
 def is_allowed(uid: int) -> bool:
     return ALLOWED_USER_ID == 0 or uid == ALLOWED_USER_ID
 
@@ -63,15 +100,54 @@ def _looks_like_video_document(document) -> bool:
     return mime_type.startswith("video/") or any(file_name.endswith(ext) for ext in VIDEO_DOC_EXTENSIONS)
 
 
+def _is_important_log_line(line: str) -> bool:
+    if not line.strip():
+        return False
+
+    if "httpx" in line or "httpcore" in line:
+        return False
+
+    if any(keyword in line for keyword in IMPORTANT_LOG_KEYWORDS):
+        return True
+
+    if 'File "/app/' in line:
+        return True
+
+    if " ERROR " in line or " WARNING " in line:
+        return True
+
+    return False
+
+
+def _get_log_tail(raw: bool = False) -> str:
+    log_file = Path(_make_log_filename())
+    if not log_file.exists():
+        return "📂 Лог-файл за этот месяц ещё пуст."
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+
+    if raw:
+        selected = lines[-80:]
+    else:
+        important = [line for line in lines if _is_important_log_line(line)]
+        selected = important[-80:] if important else lines[-40:]
+
+    text = "\n".join(selected) or "Лог пуст."
+    if len(text) > 3900:
+        text = "…(обрезано)\n" + text[-3900:]
+    return text
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     times = get_post_times()
     tstr = " / ".join(f"{h:02d}:{m:02d}" for h, m in times)
     stats = await database.get_queue_stats()
     paused = await database.is_paused()
     status = "⏸ <b>ПАУЗА</b>" if paused else "▶️ Работает"
+
     await update.message.reply_text(
         f"🤖 <b>Pinterest Auto-Poster</b>  {status}\n\n"
-        f"Скидывай любое обычное видео — бот сам приведёт его к формату Pinterest, добавит описание и запостит.\n\n"
+        f"Скидывай обычные видео — бот сам приведёт их к формату Pinterest, добавит описание и запостит.\n\n"
         f"🕐 {POSTS_PER_DAY} видео/день: {tstr} ({TIMEZONE})\n"
         f"📋 В очереди: {stats['pending']} / макс. {stats['queue_max']}\n"
         f"📦 Размер файла: до {MAX_VIDEO_MB} MB\n\n"
@@ -79,7 +155,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/stats — статистика\n"
         f"/retry — повторить упавшие\n"
         f"/pause | /resume — пауза / возобновить\n"
-        f"/log — последние логи",
+        f"/log — важные логи\n"
+        f"/log full — сырой хвост",
         parse_mode="HTML",
     )
 
@@ -87,12 +164,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     stats = await database.get_queue_stats()
     pending = stats["pending"]
     days = (pending // POSTS_PER_DAY) + (1 if pending % POSTS_PER_DAY else 0)
     tstr = " / ".join(f"{h:02d}:{m:02d}" for h, m in get_post_times())
     paused = await database.is_paused()
     pause_tag = "  ⏸ ПАУЗА" if paused else ""
+
     await update.message.reply_text(
         f"📋 <b>Очередь{pause_tag}</b>\n\n"
         f"⏳ Ожидает: <b>{pending}</b> (~{days} дн.) / макс. {stats['queue_max']}\n"
@@ -106,12 +185,14 @@ async def cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     from datetime import timedelta
 
     stats = await database.get_queue_stats()
     now = datetime.now()
     w0 = (now - timedelta(days=7)).strftime("%d.%m")
     w1 = now.strftime("%d.%m")
+
     await update.message.reply_text(
         f"📊 <b>Статистика Pinterest</b>\n\n"
         f"За 7 дней ({w0}–{w1}):\n"
@@ -126,10 +207,12 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     stats = await database.get_queue_stats()
     if stats["pending"] == 0:
         await update.message.reply_text("📭 Очередь пуста — добавь видео.")
         return
+
     await update.message.reply_text("🚀 Запускаю публикацию прямо сейчас...")
     from scheduler import post_next_from_queue
 
@@ -139,6 +222,7 @@ async def cmd_testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     count = await database.reset_failed_to_pending()
     if count == 0:
         await update.message.reply_text("✅ Упавших постов нет — всё чисто.")
@@ -152,6 +236,7 @@ async def cmd_retry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     await database.set_state("paused", "1")
     await update.message.reply_text(
         "⏸ <b>Постинг приостановлен.</b>\n\nВидео копятся в очереди, не публикуются.\n/resume — возобновить.",
@@ -162,6 +247,7 @@ async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
+
     await database.set_state("paused", "0")
     stats = await database.get_queue_stats()
     await update.message.reply_text(
@@ -173,14 +259,9 @@ async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    log_file = Path(_make_log_filename())
-    if not log_file.exists():
-        await update.message.reply_text("📂 Лог-файл за этот месяц ещё пуст.")
-        return
-    lines = log_file.read_text(encoding="utf-8").splitlines()[-60:]
-    text = "\n".join(lines) or "Лог пуст."
-    if len(text) > 3900:
-        text = "…(обрезано)\n" + text[-3900:]
+
+    raw = bool(context.args and context.args[0].lower() == "full")
+    text = _get_log_tail(raw=raw)
     await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
 
 
@@ -196,10 +277,11 @@ async def _flush_batch(user_id: int, bot):
     added = data["added"]
     skipped = data["skipped"]
 
-    msg = f"📦 <b>Загрузка завершена</b>\n\n✅ Добавлено: <b>{added}</b> видео\n"
+    msg = f"✅ <b>Добавлено: {added} видео</b>\n\n"
+    msg += f"📋 В очереди: <b>{pending}</b>  (~{days_left} дн.)"
+
     if skipped:
-        msg += f"⚠️ Пропущено (не видео / дубли / лимит): <b>{skipped}</b>\n"
-    msg += f"\n📋 В очереди: <b>{pending}</b>  (~{days_left} дн.)"
+        msg += f"\n⚠️ Пропущено: <b>{skipped}</b>"
 
     week_threshold = POSTS_PER_DAY * 7
     if pending <= week_threshold:
