@@ -8,7 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "0") == "1"
 logger = logging.getLogger(__name__)
-logger.warning("PINTEREST_CLIENT_VERSION=final_clean_v1")
+logger.warning("PINTEREST_CLIENT_VERSION=final_clean_v3")
 
 PINTEREST_EMAIL = os.getenv("PINTEREST_EMAIL")
 PINTEREST_PASSWORD = os.getenv("PINTEREST_PASSWORD")
@@ -155,12 +155,19 @@ class PinterestClient:
                 await self._open_pin_builder(page)
                 await _send_screenshot(page, "2_builder_opened")
 
+                # Чистим старые черновики ДО загрузки нового видео
+                deleted_before = await self._purge_drafts(page, limit=60)
+                if deleted_before:
+                    logger.info("Перед стартом удалено черновиков: %s", deleted_before)
+                    await page.wait_for_timeout(1200)
+                    await self._open_pin_builder(page)
+
                 file_input = await self._find_file_input(page)
                 if not file_input:
                     await _send_screenshot(page, "error_no_file_input")
                     return {
                         "success": False,
-                        "error": "Не найден input[type=file] в pin builder [final_clean_v1]",
+                        "error": "Не найден input[type=file] в pin builder [final_clean_v3]",
                     }
 
                 await file_input.set_input_files(video_path)
@@ -183,10 +190,20 @@ class PinterestClient:
 
             except Exception as e:
                 logger.exception("Pinterest browser publish failed")
+
+                # если что-то упало после загрузки — удаляем созданный черновик
+                try:
+                    deleted_after_error = await self._purge_drafts(page, limit=10)
+                    if deleted_after_error:
+                        logger.info("После ошибки удалено черновиков: %s", deleted_after_error)
+                except Exception as cleanup_error:
+                    logger.warning("Не удалось почистить черновики после ошибки: %s", cleanup_error)
+
                 try:
                     await _send_screenshot(page, "error_final")
                 except Exception:
                     pass
+
                 return {"success": False, "error": str(e)}
 
             finally:
@@ -220,17 +237,17 @@ class PinterestClient:
                 return
 
             raise RuntimeError(
-                "Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [final_clean_v1]"
+                "Ручной вход не завершён. Сохрани сессию локально и загрузи файл состояния. [final_clean_v3]"
             )
 
         if not PINTEREST_EMAIL or not PINTEREST_PASSWORD:
-            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [final_clean_v1]")
+            raise RuntimeError("Нет PINTEREST_EMAIL или PINTEREST_PASSWORD [final_clean_v3]")
 
         await _login(page)
 
         if not await _is_logged_in(page):
             raise RuntimeError(
-                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [final_clean_v1]"
+                "Pinterest login не прошёл. Pinterest режет headless-логин. Нужна сохранённая сессия SESSION_FILE. [final_clean_v3]"
             )
 
     async def _open_pin_builder(self, page):
@@ -244,7 +261,7 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Не удалось открыть pin builder [final_clean_v1]")
+        raise RuntimeError("Не удалось открыть pin builder [final_clean_v3]")
 
     async def _page_has_builder(self, page) -> bool:
         for sel in [
@@ -339,41 +356,122 @@ class PinterestClient:
 
     async def _select_board(self, page, board_name: str):
         if not board_name:
-            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [final_clean_v1]")
+            raise RuntimeError("Не задан PINTEREST_BOARD_NAME [final_clean_v3]")
 
         target = _norm_text(board_name)
         logger.info("Ищу доску Pinterest: %s", board_name)
 
-        openers = [
-            'div[role="button"]:has-text("Выберите доску")',
-            'div[role="button"]:has-text("Select board")',
-            'button:has-text("Выберите доску")',
-            'button:has-text("Select board")',
-            'text=Выберите доску',
-            'text=Select board',
-            '[data-test-id*="board-picker"]',
-            '[data-test-id*="board-dropdown"]',
-            '[role="combobox"]',
-            'button[aria-label*="доск" i]',
-            'button[aria-label*="board" i]',
-            '[aria-label*="доск" i]',
-            '[aria-label*="board" i]',
+        async def _in_form_area(loc) -> bool:
+            try:
+                if await loc.count() == 0:
+                    return False
+                if not await loc.is_visible():
+                    return False
+                box = await loc.bounding_box()
+                if not box:
+                    return False
+                return box["x"] >= 450 and box["y"] >= 120
+            except Exception:
+                return False
+
+        async def _click_if_good(loc, label: str) -> bool:
+            try:
+                if await _in_form_area(loc):
+                    await loc.click(timeout=4000)
+                    logger.info("Открыл выбор доски через %s", label)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        already_selected = [
+            page.get_by_text(board_name, exact=True).first,
+            page.locator(f'xpath=//*[normalize-space()="{board_name}"]').first,
         ]
 
-        opened = False
-        for sel in openers:
+        for loc in already_selected:
             try:
-                loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    await loc.click(timeout=4000)
-                    opened = True
-                    logger.info("Открыл выбор доски через %s", sel)
-                    break
+                if await _in_form_area(loc):
+                    logger.info("Доска уже выбрана: %s", board_name)
+                    return
             except Exception:
                 pass
 
+        openers = [
+            ("xpath-target", page.locator(f'xpath=//*[normalize-space()="{board_name}"]').first),
+            ("xpath-choose-ru", page.locator('xpath=//*[normalize-space()="Выберите доску"]').first),
+            ("xpath-choose-en", page.locator('xpath=//*[normalize-space()="Select board"]').first),
+            ("data-test-board-picker", page.locator('[data-test-id*="board-picker"]').first),
+            ("data-test-board-dropdown", page.locator('[data-test-id*="board-dropdown"]').first),
+            ("text-choose-ru", page.get_by_text("Выберите доску", exact=True).first),
+            ("text-choose-en", page.get_by_text("Select board", exact=True).first),
+        ]
+
+        opened = False
+        for label, loc in openers:
+            if await _click_if_good(loc, label):
+                opened = True
+                break
+
         if not opened:
-            raise RuntimeError("Не нашёл кнопку выбора доски [final_clean_v1]")
+            opened = await page.evaluate(
+                """
+                ({ target }) => {
+                    function norm(v) {
+                        return (v || "")
+                            .replace(/\\u00a0/g, " ")
+                            .replace(/_/g, " ")
+                            .replace(/-/g, " ")
+                            .replace(/\\s+/g, " ")
+                            .trim()
+                            .toLowerCase();
+                    }
+
+                    function clickable(el) {
+                        let cur = el;
+                        for (let i = 0; i < 6 && cur; i++) {
+                            const role = (cur.getAttribute("role") || "").toLowerCase();
+                            const tag = (cur.tagName || "").toLowerCase();
+                            if (
+                                tag === "button" ||
+                                role === "button" ||
+                                role === "combobox" ||
+                                cur.getAttribute("aria-haspopup") === "listbox"
+                            ) {
+                                return cur;
+                            }
+                            cur = cur.parentElement;
+                        }
+                        return el;
+                    }
+
+                    const wanted = [target, "выберите доску", "select board"];
+                    const nodes = Array.from(document.querySelectorAll("div, button, span"));
+
+                    for (const el of nodes) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.left < 450 || rect.top < 120) continue;
+
+                        const style = window.getComputedStyle(el);
+                        if (style.display === "none" || style.visibility === "hidden") continue;
+
+                        const txt = norm(el.innerText || el.textContent || "");
+                        if (!txt) continue;
+
+                        if (wanted.includes(txt)) {
+                            clickable(el).click();
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+                """,
+                {"target": target},
+            )
+
+        if not opened:
+            raise RuntimeError("Не нашёл кнопку выбора доски [final_clean_v3]")
 
         await page.wait_for_timeout(1200)
 
@@ -392,11 +490,11 @@ class PinterestClient:
         for sel in search_selectors:
             try:
                 loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
+                if await _in_form_area(loc):
                     await loc.click(timeout=2000)
                     await loc.fill("")
                     await loc.fill(board_name)
-                    await page.wait_for_timeout(1500)
+                    await page.wait_for_timeout(1200)
                     search_filled = True
                     logger.info("Поиск доски заполнен через %s", sel)
                     break
@@ -404,7 +502,7 @@ class PinterestClient:
                 pass
 
         if not search_filled:
-            logger.warning("Не нашёл поле поиска доски, продолжаю без него [final_clean_v1]")
+            logger.warning("Не нашёл поле поиска доски, продолжаю без него [final_clean_v3]")
 
         seen = []
         candidate_selectors = [
@@ -417,7 +515,6 @@ class PinterestClient:
             'span',
         ]
 
-        # exact match first
         for sel in candidate_selectors:
             try:
                 loc = page.locator(sel)
@@ -428,7 +525,7 @@ class PinterestClient:
             for i in range(min(count, 200)):
                 item = loc.nth(i)
                 try:
-                    if not await item.is_visible():
+                    if not await _in_form_area(item):
                         continue
 
                     txt = await item.inner_text(timeout=1000)
@@ -443,12 +540,11 @@ class PinterestClient:
                     if norm == target:
                         await item.click(timeout=3000)
                         logger.info("Доска выбрана exact match: %s", txt)
-                        await page.wait_for_timeout(1000)
+                        await page.wait_for_timeout(800)
                         return
                 except Exception:
                     continue
 
-        # contains match second
         for sel in candidate_selectors:
             try:
                 loc = page.locator(sel)
@@ -459,7 +555,7 @@ class PinterestClient:
             for i in range(min(count, 200)):
                 item = loc.nth(i)
                 try:
-                    if not await item.is_visible():
+                    if not await _in_form_area(item):
                         continue
 
                     txt = await item.inner_text(timeout=1000)
@@ -474,7 +570,7 @@ class PinterestClient:
                     if target in norm and len(norm) < 120:
                         await item.click(timeout=3000)
                         logger.info("Доска выбрана contains match: %s", txt)
-                        await page.wait_for_timeout(1000)
+                        await page.wait_for_timeout(800)
                         return
                 except Exception:
                     continue
@@ -495,6 +591,9 @@ class PinterestClient:
                 const nodes = Array.from(document.querySelectorAll("[role='option'], div, button, span, li"));
 
                 for (const el of nodes) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.left < 450 || rect.top < 120) continue;
+
                     const style = window.getComputedStyle(el);
                     if (style.display === "none" || style.visibility === "hidden") continue;
 
@@ -510,6 +609,9 @@ class PinterestClient:
                 }
 
                 for (const el of nodes) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.left < 450 || rect.top < 120) continue;
+
                     const style = window.getComputedStyle(el);
                     if (style.display === "none" || style.visibility === "hidden") continue;
 
@@ -551,12 +653,12 @@ class PinterestClient:
 
         if clicked:
             logger.info("Доска выбрана JS fallback: %s", clicked)
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(800)
             return
 
         preview = ", ".join(seen[:20])
         raise RuntimeError(
-            f"Не нашёл доску '{board_name}' в списке. Чистые варианты: {preview} [final_clean_v1]"
+            f"Не нашёл доску '{board_name}' в списке. Чистые варианты: {preview} [final_clean_v3]"
         )
 
     async def _publish(self, page):
@@ -575,7 +677,113 @@ class PinterestClient:
             except Exception:
                 pass
 
-        raise RuntimeError("Кнопка публикации не найдена [final_clean_v1]")
+        raise RuntimeError("Кнопка публикации не найдена [final_clean_v3]")
+
+    async def _purge_drafts(self, page, limit=60):
+        await page.wait_for_timeout(700)
+
+        # если панели черновиков нет — просто выходим
+        try:
+            sidebar = page.locator('text=Черновики пина').first
+            if await sidebar.count() == 0 or not await sidebar.is_visible():
+                return 0
+        except Exception:
+            return 0
+
+        deleted = 0
+
+        for _ in range(limit):
+            menu_btn = await self._find_draft_menu_button(page)
+            if menu_btn is None:
+                break
+
+            try:
+                await menu_btn.click(timeout=1500)
+                await page.wait_for_timeout(300)
+            except Exception:
+                break
+
+            delete_clicked = False
+            delete_locators = [
+                page.get_by_role("menuitem", name="Удалить").first,
+                page.get_by_role("menuitem", name="Delete").first,
+                page.get_by_text("Удалить", exact=True).first,
+                page.get_by_text("Delete", exact=True).first,
+            ]
+
+            for loc in delete_locators:
+                try:
+                    if await loc.count() > 0 and await loc.is_visible():
+                        await loc.click(timeout=1500)
+                        delete_clicked = True
+                        break
+                except Exception:
+                    pass
+
+            if not delete_clicked:
+                try:
+                    await page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                break
+
+            await page.wait_for_timeout(500)
+
+            confirm_locators = [
+                page.get_by_role("button", name="Удалить").first,
+                page.get_by_role("button", name="Delete").first,
+                page.get_by_text("Удалить", exact=True).last,
+                page.get_by_text("Delete", exact=True).last,
+            ]
+
+            for loc in confirm_locators:
+                try:
+                    if await loc.count() > 0 and await loc.is_visible():
+                        await loc.click(timeout=1200)
+                        break
+                except Exception:
+                    pass
+
+            await page.wait_for_timeout(800)
+            deleted += 1
+
+        if deleted:
+            logger.info("Удалено черновиков: %s", deleted)
+
+        return deleted
+
+    async def _find_draft_menu_button(self, page):
+        selectors = ['button', '[role="button"]']
+
+        for sel in selectors:
+            try:
+                loc = page.locator(sel)
+                count = await loc.count()
+            except Exception:
+                continue
+
+            for i in range(min(count, 150)):
+                item = loc.nth(i)
+                try:
+                    if not await item.is_visible():
+                        continue
+
+                    box = await item.bounding_box()
+                    if not box:
+                        continue
+
+                    # левая панель черновиков, район трёх точек
+                    if not (250 <= box["x"] <= 340 and 170 <= box["y"] <= 1200):
+                        continue
+
+                    if box["width"] > 60 or box["height"] > 60:
+                        continue
+
+                    return item
+                except Exception:
+                    continue
+
+        return None
 
 
 async def _fill_best_effort(page, value: str, selectors: list[str]):
